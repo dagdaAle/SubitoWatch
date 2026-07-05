@@ -1,0 +1,493 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>SubitoWatch — Verona</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --panel-2: #1e222b;
+    --border: #2a2f3a;
+    --text: #e6e8ec;
+    --muted: #9aa3b2;
+    --accent: #ff6a00;      /* Subito orange */
+    --accent-2: #2d7dff;
+    --like: #35c26b;
+    --dislike: #e5484d;
+    --new: #ffcf33;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  header {
+    padding: 16px 24px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  }
+  header h1 { font-size: 20px; margin: 0; }
+  header .dot { color: var(--accent); }
+  header .sub { color: var(--muted); font-size: 13px; }
+
+  .layout { display: grid; grid-template-columns: 280px 1fr; min-height: calc(100vh - 57px); }
+  @media (max-width: 780px) { .layout { grid-template-columns: 1fr; } }
+
+  /* Sidebar */
+  .sidebar {
+    border-right: 1px solid var(--border); padding: 16px; background: var(--panel);
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  .side-title { font-size: 12px; text-transform: uppercase; letter-spacing: .04em;
+    color: var(--muted); margin: 12px 4px 4px; }
+  .nav-item {
+    display: flex; align-items: center; gap: 8px; padding: 9px 11px;
+    border-radius: 8px; cursor: pointer; border: 1px solid transparent;
+  }
+  .nav-item:hover { background: var(--panel-2); }
+  .nav-item.active { background: var(--panel-2); border-color: var(--accent); }
+  .nav-item .name { flex: 1; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .nav-item .count {
+    font-size: 12px; color: var(--muted); background: var(--bg);
+    border: 1px solid var(--border); border-radius: 999px; padding: 1px 8px;
+  }
+  .nav-item .count.new { background: var(--new); color: #111; border-color: var(--new); font-weight: 700; }
+  .nav-item .del { color: var(--muted); font-size: 15px; padding: 0 4px; visibility: hidden; }
+  .nav-item:hover .del { visibility: visible; }
+  .nav-item .del:hover { color: var(--dislike); }
+
+  /* New channel form */
+  form.newch {
+    display: grid; gap: 8px; background: var(--panel-2);
+    border: 1px solid var(--border); border-radius: 10px; padding: 12px; margin-top: 6px;
+  }
+  form.newch .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  label { display: block; font-size: 11px; color: var(--muted); margin-bottom: 3px; }
+  input, select {
+    width: 100%; padding: 8px 9px; border-radius: 7px;
+    border: 1px solid var(--border); background: var(--bg);
+    color: var(--text); font-size: 13px;
+  }
+  input:focus, select:focus { outline: none; border-color: var(--accent); }
+  button {
+    padding: 9px 14px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--accent); color: #111; font-weight: 700; cursor: pointer; font-size: 13px;
+  }
+  button.secondary { background: var(--panel-2); color: var(--text); font-weight: 600; }
+  button.ghost { background: transparent; color: var(--muted); }
+  button:disabled { opacity: .5; cursor: default; }
+
+  /* Main */
+  .main { padding: 20px 24px 60px; }
+  .main-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 6px; }
+  .main-head h2 { margin: 0; font-size: 20px; }
+  .main-head .kw { color: var(--muted); font-size: 13px; }
+  .toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 14px 0; color: var(--muted); font-size: 13px; }
+  .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .seg button { background: var(--panel-2); color: var(--text); font-weight: 600; border: none; border-radius: 0; }
+  .seg button.on { background: var(--accent); color: #111; }
+  .grow { flex: 1; }
+
+  .cards { display: grid; gap: 12px; }
+  .card {
+    display: grid; grid-template-columns: 96px 1fr auto; gap: 14px;
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 12px; padding: 12px; align-items: center;
+  }
+  .card.is-new { border-color: var(--new); box-shadow: 0 0 0 1px var(--new) inset; }
+  .card.disliked { opacity: .5; }
+  .thumb {
+    width: 96px; height: 96px; border-radius: 8px; object-fit: cover;
+    background: var(--panel-2); border: 1px solid var(--border);
+  }
+  .thumb.placeholder { display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 11px; }
+  .info h3 { margin: 0 0 4px; font-size: 16px; }
+  .info h3 a { color: var(--text); text-decoration: none; }
+  .info h3 a:hover { color: var(--accent); }
+  .price { color: var(--accent); font-weight: 800; font-size: 17px; }
+  .meta { color: var(--muted); font-size: 13px; margin-top: 4px; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 700; background: var(--new); color: #111; }
+  .badge.shop { background: var(--accent-2); color: #fff; }
+  .actions { display: flex; flex-direction: column; gap: 8px; }
+  .actions button { background: var(--panel-2); border: 1px solid var(--border); color: var(--text); font-weight: 600; padding: 6px 12px; min-width: 60px; }
+  .actions button.like.on { background: var(--like); color: #06210f; border-color: var(--like); }
+  .actions button.dislike.on { background: var(--dislike); color: #2a0708; border-color: var(--dislike); }
+  #status { color: var(--muted); font-size: 13px; padding: 24px 0; text-align: center; }
+  #status.err { color: var(--dislike); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Subito<span class="dot">Watch</span></h1>
+  <span class="sub">Provincia di Verona · si aggiorna ogni giorno</span>
+</header>
+
+<div class="layout">
+  <aside class="sidebar">
+    <div class="side-title">Canali</div>
+    <div id="channelNav"></div>
+
+    <div class="side-title">Vista</div>
+    <div class="nav-item" id="favNav">
+      <span class="name">★ Preferiti</span>
+      <span class="count" id="favCount">0</span>
+    </div>
+
+    <div class="side-title">Nuovo canale</div>
+    <form class="newch" id="newChannelForm">
+      <div>
+        <label>Nome</label>
+        <input id="chName" placeholder="es. Moto" required />
+      </div>
+      <div>
+        <label>Parole chiave (separate da virgola)</label>
+        <input id="chKeywords" placeholder="es. moto, scooter, casco" required />
+      </div>
+      <div>
+        <label>Comune (vuoto = tutta la provincia)</label>
+        <input id="chComune" placeholder="es. Legnago — vuoto per tutta VR" />
+      </div>
+      <div class="row2">
+        <div>
+          <label>Min €</label>
+          <input id="chMin" type="number" min="0" placeholder="0" />
+        </div>
+        <div>
+          <label>Max €</label>
+          <input id="chMax" type="number" min="0" placeholder="—" />
+        </div>
+      </div>
+      <button type="submit" id="createBtn">Crea canale</button>
+    </form>
+  </aside>
+
+  <main class="main">
+    <div class="main-head">
+      <h2 id="viewTitle">Benvenuto</h2>
+      <span class="kw" id="viewKw"></span>
+      <span class="grow"></span>
+      <button class="secondary" id="refreshBtn" style="display:none;">↻ Aggiorna</button>
+    </div>
+
+    <div class="toolbar" id="toolbar" style="display:none;">
+      <div class="seg" id="filterSeg">
+        <button data-f="all" class="on">Tutti</button>
+        <button data-f="new">Solo nuovi</button>
+      </div>
+      <label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;">
+        <input type="checkbox" id="hideDisliked" style="width:auto;" /> Nascondi scartati
+      </label>
+      <label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;">
+        <input type="checkbox" id="hideShops" style="width:auto;" checked /> Nascondi negozi
+      </label>
+      <span class="grow"></span>
+      <span id="counts"></span>
+    </div>
+
+    <div class="cards" id="cards"></div>
+    <div id="status">Crea un canale per iniziare, oppure apri i tuoi Preferiti.</div>
+  </main>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+
+let channels = [];
+let feedback = {};
+let currentView = null;   // {type:'channel', id} | {type:'favorites'} | null
+let listings = [];        // current listings shown
+let filterMode = "all";   // 'all' | 'new'
+
+function escapeHtml(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
+  ));
+}
+function fmtPrice(item) {
+  if (item.price_display) return item.price_display;
+  if (item.price != null) return item.price + " €";
+  return "—";
+}
+
+/* ---------------- Sidebar ---------------- */
+
+function renderNav() {
+  const nav = $("channelNav");
+  nav.innerHTML = "";
+  if (!channels.length) {
+    nav.innerHTML = `<div style="color:var(--muted);font-size:13px;padding:4px 8px;">Nessun canale.</div>`;
+  }
+  for (const ch of channels) {
+    const el = document.createElement("div");
+    el.className = "nav-item" +
+      (currentView && currentView.type === "channel" && currentView.id === ch.id ? " active" : "");
+    const countCls = ch.new_count > 0 ? "count new" : "count";
+    const countTxt = ch.new_count > 0 ? (ch.new_count + " nuovi") : (ch.total_count + "");
+    el.innerHTML = `
+      <span class="name">${escapeHtml(ch.name)}</span>
+      <span class="${countCls}">${countTxt}</span>
+      <span class="del" title="Elimina">✕</span>`;
+    el.querySelector(".name").addEventListener("click", () => openChannel(ch.id));
+    el.querySelector(".count").addEventListener("click", () => openChannel(ch.id));
+    el.querySelector(".del").addEventListener("click", (e) => { e.stopPropagation(); deleteChannel(ch); });
+    nav.appendChild(el);
+  }
+  const favNav = $("favNav");
+  favNav.classList.toggle("active", !!currentView && currentView.type === "favorites");
+}
+
+/* ---------------- Cards ---------------- */
+
+function card(item) {
+  const verdict = feedback[item.listing_url] || null;
+  const el = document.createElement("div");
+  el.className = "card" + (item.is_new ? " is-new" : "") + (verdict === "dislike" ? " disliked" : "");
+  const thumb = item.thumbnail
+    ? `<img class="thumb" src="${item.thumbnail}" loading="lazy" alt="" />`
+    : `<div class="thumb placeholder">no img</div>`;
+  const loc = [item.town, item.city].filter(Boolean).join(", ");
+  const newBadge = item.is_new ? `<span class="badge">NUOVO</span> ` : "";
+  const shopBadge = item.is_shop
+    ? `<span class="badge shop" title="${escapeHtml(item.shop_name || "")}">NEGOZIO</span> `
+    : "";
+  el.innerHTML = `
+    ${thumb}
+    <div class="info">
+      <h3>${newBadge}${shopBadge}<a href="${item.listing_url}" target="_blank" rel="noopener">${escapeHtml(item.title)}</a></h3>
+      <div class="price">${escapeHtml(fmtPrice(item))}</div>
+      <div class="meta">${escapeHtml(loc)}${item.date ? " · " + escapeHtml(item.date) : ""}</div>
+    </div>
+    <div class="actions">
+      <button class="like ${verdict === "like" ? "on" : ""}" data-v="like">👍</button>
+      <button class="dislike ${verdict === "dislike" ? "on" : ""}" data-v="dislike">👎</button>
+    </div>`;
+  el.querySelectorAll(".actions button").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const v = btn.dataset.v;
+      const next = feedback[item.listing_url] === v ? null : v;
+      sendFeedback(item, next);
+    });
+  });
+  return el;
+}
+
+function render() {
+  const cards = $("cards");
+  cards.innerHTML = "";
+  const hideDisliked = $("hideDisliked").checked;
+  const hideShops = $("hideShops").checked;
+  const isFav = currentView && currentView.type === "favorites";
+  let shown = 0;
+  for (const item of listings) {
+    if (!isFav && filterMode === "new" && !item.is_new) continue;
+    if (!isFav && hideShops && item.is_shop) continue;
+    if (hideDisliked && feedback[item.listing_url] === "dislike") continue;
+    cards.appendChild(card(item));
+    shown++;
+  }
+  if (isFav) {
+    $("counts").textContent = `${shown} preferiti`;
+  } else {
+    const newCount = listings.filter((x) => x.is_new).length;
+    $("counts").textContent = `${shown} annunci${newCount ? " · " + newCount + " nuovi" : ""}`;
+  }
+  $("status").textContent = shown ? "" : (isFav ? "Nessun preferito ancora." : "Nessun annuncio da mostrare.");
+  $("status").className = "";
+}
+
+/* ---------------- Feedback ---------------- */
+
+async function sendFeedback(item, verdict) {
+  const prev = feedback[item.listing_url];
+  if (verdict === null) delete feedback[item.listing_url];
+  else feedback[item.listing_url] = verdict; // optimistic
+  render();
+  try {
+    await fetch("/feedback", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        listing_url: item.listing_url, verdict,
+        title: item.title, price: item.price,
+        price_display: item.price_display || "",
+        town: item.town || "", thumbnail: item.thumbnail || null,
+        is_shop: !!item.is_shop, shop_name: item.shop_name || "",
+      }),
+    });
+  } catch (_) { /* keep optimistic */ }
+  // If we're in the favorites view and just unliked, drop it from the list.
+  if (currentView && currentView.type === "favorites" && verdict !== "like") {
+    listings = listings.filter((x) => x.listing_url !== item.listing_url);
+    render();
+  }
+  loadChannels(); // refresh favorites count
+}
+
+/* ---------------- Channels API ---------------- */
+
+async function loadChannels() {
+  try {
+    const res = await fetch("/channels");
+    const data = await res.json();
+    channels = data.channels || [];
+    renderNav();
+  } catch (_) {}
+  try {
+    const res = await fetch("/favorites");
+    const data = await res.json();
+    $("favCount").textContent = (data.favorites || []).length;
+  } catch (_) {}
+}
+
+async function openChannel(id) {
+  const ch = channels.find((c) => c.id === id);
+  currentView = { type: "channel", id };
+  filterMode = "all";
+  updateSegUI();
+  $("viewTitle").textContent = ch ? ch.name : "Canale";
+  $("viewKw").textContent = ch ? ch.keywords.join(" · ") : "";
+  $("refreshBtn").style.display = "";
+  $("toolbar").style.display = "";
+  renderNav();
+  $("status").textContent = "Caricamento…";
+  $("status").className = "";
+  listings = [];
+  render();
+  try {
+    const res = await fetch(`/channels/${id}/listings`);
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const data = await res.json();
+    listings = data.listings || [];
+    feedback = data.feedback || {};
+    render();
+  } catch (e) {
+    $("status").textContent = "Errore: " + e.message;
+    $("status").className = "err";
+  }
+}
+
+async function refreshCurrentChannel() {
+  if (!currentView || currentView.type !== "channel") return;
+  $("refreshBtn").disabled = true;
+  const old = $("refreshBtn").textContent;
+  $("refreshBtn").textContent = "↻ Aggiorno…";
+  try {
+    const res = await fetch(`/channels/${currentView.id}/refresh`, { method: "POST" });
+    if (!res.ok) {
+      const b = await res.json().catch(() => ({}));
+      throw new Error(b.detail || ("HTTP " + res.status));
+    }
+    const data = await res.json();
+    listings = data.listings || [];
+    feedback = data.feedback || {};
+    render();
+    loadChannels();
+  } catch (e) {
+    $("status").textContent = "Errore: " + e.message;
+    $("status").className = "err";
+  } finally {
+    $("refreshBtn").disabled = false;
+    $("refreshBtn").textContent = old;
+  }
+}
+
+async function deleteChannel(ch) {
+  if (!confirm(`Eliminare il canale "${ch.name}"?`)) return;
+  try {
+    await fetch(`/channels/${ch.id}`, { method: "DELETE" });
+  } catch (_) {}
+  if (currentView && currentView.type === "channel" && currentView.id === ch.id) {
+    currentView = null;
+    listings = [];
+    $("viewTitle").textContent = "Benvenuto";
+    $("viewKw").textContent = "";
+    $("refreshBtn").style.display = "none";
+    $("toolbar").style.display = "none";
+    $("cards").innerHTML = "";
+    $("status").textContent = "Crea un canale per iniziare, oppure apri i tuoi Preferiti.";
+  }
+  loadChannels();
+}
+
+async function createChannel(e) {
+  e.preventDefault();
+  const name = $("chName").value.trim();
+  const keywords = $("chKeywords").value.split(",").map((s) => s.trim()).filter(Boolean);
+  if (!name || !keywords.length) return;
+  $("createBtn").disabled = true;
+  $("createBtn").textContent = "Creo…";
+  try {
+    const res = await fetch("/channels", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name, keywords,
+        comune: $("chComune").value.trim(),
+        min_price: $("chMin").value ? Number($("chMin").value) : null,
+        max_price: $("chMax").value ? Number($("chMax").value) : null,
+      }),
+    });
+    if (!res.ok) {
+      const b = await res.json().catch(() => ({}));
+      throw new Error(b.detail || ("HTTP " + res.status));
+    }
+    const data = await res.json();
+    $("newChannelForm").reset();
+    await loadChannels();
+    if (data.channel) openChannel(data.channel.id);
+  } catch (err) {
+    alert("Errore nella creazione: " + err.message);
+  } finally {
+    $("createBtn").disabled = false;
+    $("createBtn").textContent = "Crea canale";
+  }
+}
+
+/* ---------------- Favorites view ---------------- */
+
+async function openFavorites() {
+  currentView = { type: "favorites" };
+  $("viewTitle").textContent = "★ Preferiti";
+  $("viewKw").textContent = "";
+  $("refreshBtn").style.display = "none";
+  $("toolbar").style.display = "";
+  renderNav();
+  $("status").textContent = "Caricamento…";
+  listings = [];
+  render();
+  try {
+    const [favRes, fbRes] = await Promise.all([fetch("/favorites"), fetch("/channels")]);
+    const favData = await favRes.json();
+    listings = (favData.favorites || []).map((x) => ({ ...x, is_new: false }));
+    // Everything here is liked.
+    feedback = {};
+    for (const it of listings) feedback[it.listing_url] = "like";
+    render();
+  } catch (e) {
+    $("status").textContent = "Errore: " + e.message;
+    $("status").className = "err";
+  }
+}
+
+/* ---------------- Segmented filter ---------------- */
+
+function updateSegUI() {
+  $("filterSeg").querySelectorAll("button").forEach((b) => {
+    b.classList.toggle("on", b.dataset.f === filterMode);
+  });
+}
+
+$("newChannelForm").addEventListener("submit", createChannel);
+$("favNav").addEventListener("click", openFavorites);
+$("refreshBtn").addEventListener("click", refreshCurrentChannel);
+$("hideDisliked").addEventListener("change", render);
+$("hideShops").addEventListener("change", render);
+$("filterSeg").querySelectorAll("button").forEach((b) => {
+  b.addEventListener("click", () => { filterMode = b.dataset.f; updateSegUI(); render(); });
+});
+
+loadChannels();
+</script>
+</body>
+</html>

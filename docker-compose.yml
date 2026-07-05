@@ -1,0 +1,17 @@
+services:
+  subitowatch:
+    build:
+      context: .
+      dockerfile: webapp/Dockerfile
+    image: subitowatch:latest
+    container_name: subitowatch
+    ports:
+      # host 8081 -> container 8000 (8080 is used by jobspy-web locally)
+      - "8081:8000"
+    volumes:
+      # Persist seen listings + favorites across container restarts.
+      - subito-data:/data
+    restart: unless-stopped
+
+volumes:
+  subito-data:
