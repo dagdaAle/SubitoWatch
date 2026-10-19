@@ -215,6 +215,36 @@ def get_channel(channel_id: int) -> dict[str, Any] | None:
     return _row_to_channel(row) if row else None
 
 
+def update_channel(channel_id: int, fields: dict[str, Any]) -> dict[str, Any] | None:
+    """Update the given channel fields and return the channel, or None if missing.
+
+    Listings already in the channel are kept; the new filters apply from the
+    next refresh. min_price / max_price can be cleared with None.
+    """
+    current = get_channel(channel_id)
+    if current is None:
+        return None
+    merged = {**current, **{k: v for k, v in fields.items()
+                            if v is not None or k in ("min_price", "max_price")}}
+    name = (merged["name"] or "").strip()
+    kws = [k.strip() for k in merged["keywords"] if k and k.strip()]
+    if not name:
+        raise ValueError("channel name is required")
+    if not kws:
+        raise ValueError("at least one keyword is required")
+    with _lock, _connect() as conn:
+        conn.execute(
+            """
+            UPDATE channels
+               SET name = ?, keywords = ?, comune = ?, min_price = ?, max_price = ?
+             WHERE id = ?
+            """,
+            (name, json.dumps(kws, ensure_ascii=False), merged["comune"] or "",
+             merged["min_price"], merged["max_price"], channel_id),
+        )
+    return get_channel(channel_id)
+
+
 def delete_channel(channel_id: int) -> None:
     with _lock, _connect() as conn:
         conn.execute("DELETE FROM channels WHERE id = ?", (channel_id,))

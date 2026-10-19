@@ -49,6 +49,15 @@ class ChannelCreate(BaseModel):
     max_price: int | None = Field(None, ge=0)
 
 
+class ChannelUpdate(BaseModel):
+    """Partial update: only the fields sent are changed."""
+    name: str | None = Field(None, min_length=1)
+    keywords: list[str] | None = Field(None, min_length=1)
+    comune: str | None = None
+    min_price: int | None = Field(None, ge=0)
+    max_price: int | None = Field(None, ge=0)
+
+
 class FeedbackRequest(BaseModel):
     listing_url: str = Field(..., min_length=1)
     verdict: Literal["like", "dislike"] | None = None
@@ -126,6 +135,18 @@ def add_channel(req: ChannelCreate) -> dict[str, Any]:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     channel["new_count"] = new_count
     channel["total_count"] = new_count
+    return {"channel": channel}
+
+
+@app.put("/channels/{channel_id}")
+def update_channel(channel_id: int, req: ChannelUpdate) -> dict[str, Any]:
+    """Change a channel's name/filters. The new filters apply from the next refresh."""
+    try:
+        channel = storage.update_channel(channel_id, req.model_dump(exclude_unset=True))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if channel is None:
+        raise HTTPException(status_code=404, detail="Canale non trovato.")
     return {"channel": channel}
 
 
