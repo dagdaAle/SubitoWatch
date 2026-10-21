@@ -3,13 +3,14 @@ from __future__ import annotations
 
 import json
 import os
+from copy import deepcopy
 
 import httpx
 
 from models import Analysis
 import images as image_loader
 
-VERSION = 'buywatcher-2'
+VERSION = 'buywatcher-3'
 
 
 def configured():
@@ -28,8 +29,12 @@ def complete(system, payload, *, images=None):
     if not model:
         model = os.environ['BUYWATCHER_AI_MODEL']
         images = []
-    content = [{'type':'text','text':json.dumps(payload, ensure_ascii=False)}]
-    content.extend({'type':'image_url','image_url':{'url':url}} for url in images)
+    # The schema is enforced by the provider; repeating it among listing data
+    # wastes context and distracts small local models from the actual advert.
+    content = [{'type':'text','text':json.dumps({k:v for k,v in payload.items() if k != 'output_schema'}, ensure_ascii=False)}]
+    for index, url in enumerate(images):
+        content.append({'type':'text','text':f'Foto allegata: image_index={index}'})
+        content.append({'type':'image_url','image_url':{'url':url}})
     headers = {}
     if os.getenv('BUYWATCHER_AI_API_KEY'):
         headers['Authorization'] = 'Bearer '+os.environ['BUYWATCHER_AI_API_KEY']
@@ -37,7 +42,8 @@ def complete(system, payload, *, images=None):
         with httpx.Client(timeout=max(30, min(600, int(os.getenv('BUYWATCHER_AI_TIMEOUT', '120')))), follow_redirects=False) as client:
             response = client.post(os.environ['BUYWATCHER_AI_BASE_URL'].rstrip('/')+'/chat/completions',
                 headers=headers, json={'model':model, 'temperature':0,
-                'response_format':{'type':'json_object'}, 'max_tokens':2000,
+                'response_format':({'type':'json_schema','json_schema':{'name':'listing_analysis','schema':payload['output_schema']}}
+                                   if 'output_schema' in payload else {'type':'json_object'}), 'max_tokens':3000,
                 **({'reasoning_effort':os.environ['BUYWATCHER_AI_REASONING_EFFORT']} if os.getenv('BUYWATCHER_AI_REASONING_EFFORT') else {}),
                 'messages':[{'role':'system','content':system}, {'role':'user','content':content}]})
         response.raise_for_status()
@@ -60,18 +66,46 @@ funzionamento, autenticità, assenza di difetti nascosti o truffe. Un rischio è
 Separa sempre condizioni DICHIARATE dal venditore da osservazioni effettivamente visibili.
 Senza immagini allegate non fare osservazioni visive; URL e didascalie non sono immagini viste.
 Per ogni osservazione cita una frase dalla descrizione o una descrizione puntuale dell'immagine
-con image_index zero-based. Segnala requisiti falliti e requisiti non verificabili separatamente.
+con image_index zero-based. Per basis=image, image_index è OBBLIGATORIAMENTE un numero tra
+gli attached_image_indexes, mai null; per description e metadata usa null. Se non sai indicare
+una foto precisa, non inserire l'osservazione visiva. Non ricavare la numerazione dagli URL.
+Segnala requisiti falliti e requisiti non verificabili separatamente.
+Un modello presente nell'annuncio non è automaticamente un modello richiesto dall'acquirente.
+Se il topic lascia taglia, budget o destinazione d'uso da definire, non inventare vincoli;
+riporta nelle unknowns e nelle questions le informazioni che servono per scegliere.
+Un logo visibile non dimostra l'autenticità. Le condizioni dichiarate non sono condizioni provate.
 product_key identifica marca + modello + variante (minuscolo), mai generiche categorie;
 configuration descrive il bundle in modo canonico. Se non identificabili, usa null.
 La confidence misura la solidità delle evidenze, non la fiducia nel venditore.
 Usa unknown se le condizioni non sono verificabili; difetti estetici non provano guasti.
+Sii sintetico: reason entro tre frasi, al massimo cinque osservazioni puntuali, evita ripetizioni.
 Rispetta lo schema fornito, senza campi aggiuntivi.''' 
+
+
+def analysis_schema(image_count):
+    schema = Analysis.model_json_schema()
+    evidence = schema['$defs']['Evidence']
+    text_evidence = deepcopy(evidence)
+    text_evidence['properties']['basis'] = {'type':'string','enum':['description','metadata']}
+    text_evidence['properties']['image_index'] = {'type':'null'}
+    variants = [text_evidence]
+    if image_count:
+        photo_evidence = deepcopy(evidence)
+        photo_evidence['properties']['basis'] = {'type':'string','const':'image'}
+        photo_evidence['properties']['image_index'] = {'type':'integer','enum':list(range(image_count))}
+        photo_evidence['required'] = list(dict.fromkeys([*photo_evidence['required'],'image_index']))
+        variants.append(photo_evidence)
+    schema['$defs']['Evidence'] = {'anyOf':variants}
+    schema['properties']['observations']['maxItems'] = 5
+    schema['properties']['reason']['maxLength'] = 600
+    return schema
 
 
 def evaluate(topic, listing):
     images, indexes = image_loader.prepare(listing.get('images', [])) if os.getenv('BUYWATCHER_VISION_MODEL') else ([], [])
     payload = {'topic':topic, 'listing':{k:v for k,v in listing.items() if k not in ('analysis','error','evaluation_key','content_hash')},
-               'attached_images':len(images), 'output_schema':Analysis.model_json_schema()}
+               'attached_images':len(images), 'attached_image_indexes':list(range(len(images))),
+               'output_schema':analysis_schema(len(images))}
     result = Analysis.model_validate(complete(SYSTEM, payload, images=images))
     for obs in result.observations:
         if obs.basis == 'image' and (obs.image_index is None or obs.image_index >= len(images)):
@@ -79,6 +113,7 @@ def evaluate(topic, listing):
         if obs.basis != 'image' and obs.image_index is not None:
             raise RuntimeError('Analisi rifiutata: riferimento fotografico incoerente.')
     body = result.model_dump()
+    body['observations'] = list({json.dumps(o,sort_keys=True):o for o in body['observations']}.values())
     for observation in body['observations']:
         if observation['basis'] == 'image':
             observation['image_index'] = indexes[observation['image_index']]

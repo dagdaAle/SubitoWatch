@@ -16,6 +16,16 @@ from models import ListingInput
 log=logging.getLogger('buywatcher')
 
 
+def publication_time(item):
+    for value in (item.get('published_at'), item.get('first_seen')):
+        try:
+            date = datetime.fromisoformat(value)
+            return date.replace(tzinfo=date.tzinfo or timezone.utc).timestamp()
+        except (TypeError, ValueError, OverflowError):
+            continue
+    return 0
+
+
 def key_for(topic,item):
     return item['content_hash']+':'+repo.digest({'topic':topic,'model':ai.signature(),
         'analysis_allowed':sources.source_config(item['source'])['analysis']})
@@ -24,7 +34,7 @@ def key_for(topic,item):
 def evaluate_pending(topic):
     report={'evaluated':0,'cached':0,'pending':0,'errors':0}
     limit=max(1,min(200,int(os.getenv('BUYWATCHER_MAX_AI_PER_RUN','40'))))
-    for item in repo.matches(topic['id']):
+    for item in sorted(repo.matches(topic['id']), key=publication_time, reverse=True):
         key=key_for(topic,item)
         if item['state']=='evaluated' and item['evaluation_key']==key:
             report['cached']+=1

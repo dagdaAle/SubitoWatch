@@ -39,8 +39,11 @@ Copia `.env.example` in `.env` e configura:
 | `BUYWATCHER_MAX_DETAILS_PER_SOURCE` | Massimo annunci arricchiti per fonte/esecuzione, predefinito 30 |
 | `BUYWATCHER_DB` | Override facoltativo del database; normalmente mantieni `/data/subito.db` |
 
-Il provider deve accettare `POST /chat/completions`, messaggi multimodali, JSON mode,
-`temperature=0` e `max_tokens`. Le risposte sono validate contro lo schema Pydantic.
+Il provider deve accettare `POST /chat/completions`, messaggi multimodali,
+`response_format.type=json_schema` (valutazione) e `json_object` (proposta topic),
+`temperature=0` e `max_tokens`. Lo schema di generazione consente riferimenti
+fotografici solo agli indici effettivamente allegati; le risposte sono validate
+anche contro lo schema Pydantic.
 Non è sufficiente che un endpoint accetti una connessione: verifica la restituzione
 di JSON valido e la capacità effettiva di leggere immagini con il modello scelto.
 
@@ -58,6 +61,8 @@ come immagini nell’endpoint compatibile.
 Se l’AI manca o fallisce, gli annunci rimangono in **Da verificare**, senza giudizi
 sostitutivi. Il pulsante “Valuta in attesa” riprova i candidati senza rifare la raccolta.
 Gli errori non contengono chiavi o corpi di risposta del provider.
+Il limite per esecuzione dà precedenza agli annunci pubblicati più recentemente;
+se la data manca o non è valida usa la prima rilevazione, senza inventare una data.
 
 ## 3. Fonti
 
@@ -125,7 +130,8 @@ un sito al catalogo non lo rende un’integrazione funzionante.
 
 L’AI estrae pertinenza e fatti con schema validato. Non stabilisce un prezzo di
 mercato a memoria. Una violazione di un requisito o pertinenza sotto soglia esclude
-l’annuncio dai consigliati; requisiti non verificati, rischi, confidenza bassa e
+l’annuncio dai consigliati; requisiti non verificati, condizioni sconosciute,
+parti mancanti, rischi, confidenza bassa e
 dati vecchi oltre 72 ore lo spostano in Da verificare. L’assenza da una ricerca non
 viene interpretata come una vendita.
 

@@ -86,6 +86,20 @@ class DatabaseTest(DatabaseFixture):
             engine.evaluate_pending(self.t)
             self.assertEqual(evaluate.call_count,2)
 
+    def test_ai_limit_prioritizes_publication_not_reverse_insertion(self):
+        recent=repo.save_listing(self.t['id'],listing(1,published_at='2026-10-20 10:00:00'))
+        repo.save_listing(self.t['id'],listing(2,published_at='2026-08-01T10:00:00+00:00'))
+        with patch.dict(os.environ,{'BUYWATCHER_MAX_AI_PER_RUN':'1'}),patch('ai.configured',return_value=True),patch('ai.evaluate',return_value=analysis()) as evaluate:
+            report=engine.evaluate_pending(self.t)
+        self.assertEqual(evaluate.call_args.args[1]['id'],recent)
+        self.assertEqual(report['evaluated'],1)
+        self.assertEqual(report['pending'],1)
+
+    def test_invalid_publication_falls_back_to_discovery(self):
+        self.assertEqual(engine.publication_time({'published_at':'invalid','first_seen':'2026-10-20T10:00:00Z'}),
+                         engine.publication_time({'published_at':'2026-10-20T12:00:00+02:00'}))
+        self.assertEqual(engine.publication_time({}),0)
+
     def test_old_inference_cannot_overwrite_new_content(self):
         i=repo.save_listing(self.t['id'],listing())
         key=engine.key_for(self.t,repo.matches(self.t['id'])[0])
@@ -206,6 +220,27 @@ class ExtractionTest(unittest.TestCase):
         with patch.dict(os.environ,{'BUYWATCHER_AI_MODEL':'test','BUYWATCHER_VISION_MODEL':''}),patch('ai.complete',return_value=a):
             with self.assertRaises(RuntimeError):ai.evaluate(topic(),listing())
 
+    def test_generation_schema_only_allows_existing_photo_indexes(self):
+        variants=ai.analysis_schema(2)['$defs']['Evidence']['anyOf']
+        text,photo=variants
+        self.assertEqual(photo['properties']['image_index']['enum'],[0,1])
+        self.assertIn('image_index',photo['required'])
+        self.assertEqual(text['properties']['image_index']['type'],'null')
+        self.assertNotIn('image',text['properties']['basis']['enum'])
+        self.assertEqual(len(ai.analysis_schema(0)['$defs']['Evidence']['anyOf']),1)
+
+    def test_provider_uses_constrained_schema_and_labels_each_photo(self):
+        schema=ai.analysis_schema(1)
+        with patch.dict(os.environ,{'BUYWATCHER_AI_BASE_URL':'https://example.com/v1','BUYWATCHER_AI_MODEL':'test','BUYWATCHER_VISION_MODEL':'vision-test'}),patch('ai.httpx.Client') as client:
+            response=client.return_value.__enter__.return_value.post.return_value
+            response.json.return_value={'choices':[{'message':{'content':'{}'}}]}
+            ai.complete('system',{'output_schema':schema},images=['data:image/jpeg;base64,test'])
+            request=client.return_value.__enter__.return_value.post.call_args.kwargs['json']
+        self.assertEqual(request['response_format']['json_schema']['schema'],schema)
+        self.assertEqual(request['response_format']['type'],'json_schema')
+        self.assertNotIn('output_schema',json.loads(request['messages'][1]['content'][0]['text']))
+        self.assertEqual(request['messages'][1]['content'][1],{'type':'text','text':'Foto allegata: image_index=0'})
+
 
 
 
@@ -228,6 +263,7 @@ class ExtractionTest(unittest.TestCase):
             result=ai.evaluate(topic(),ad)
         self.assertEqual(result['observations'][0]['image_index'],1)
         self.assertEqual(result['images_examined'],1)
+        self.assertEqual(complete.call_args.args[1]['attached_image_indexes'],[0])
         self.assertEqual(complete.call_args.kwargs['images'][0],'data:image/jpeg;base64,/9j/')
 
     def test_image_fetch_rejects_private_dns_resolution(self):
@@ -270,6 +306,17 @@ class ExtractionTest(unittest.TestCase):
 
 
 class ApiTest(DatabaseFixture):
+    def test_unknown_condition_and_missing_parts_require_review(self):
+        with TestClient(app) as client:
+            identity=repo.save_listing(self.t['id'],listing())
+            for changes in ({'condition_grade':'unknown'},{'missing_parts':['Alimentatore mancante']}):
+                with self.subTest(changes=changes):
+                    a=analysis();a.update(changes)
+                    item=repo.matches(self.t['id'])[0]
+                    repo.save_evaluation(self.t['id'],identity,'evaluated',a,engine.key_for(self.t,item))
+                    result=client.get(f"/api/topics/{self.t['id']}/listings").json()['listings'][0]
+                    self.assertEqual(result['view'],'review')
+
     def test_api_complete_flow_and_error_states(self):
         with TestClient(app) as client:
             self.assertEqual(client.get('/health').json()['app'],'BuyWatcher')

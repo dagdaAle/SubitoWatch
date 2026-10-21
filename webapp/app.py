@@ -160,7 +160,7 @@ def listings(topic_id:int):
             item['view']='review'
         elif analysis.get('requirement_failures') or analysis.get('relevance',0)<topic['relevance_threshold']:
             item['view']='excluded'
-        elif analysis.get('requirement_unknowns') or analysis.get('risks') or analysis.get('confidence',0)<70 or item['availability']=='unavailable' or scoring.stale(item):
+        elif analysis.get('requirement_unknowns') or analysis.get('missing_parts') or analysis.get('condition_grade','unknown')=='unknown' or analysis.get('risks') or analysis.get('confidence',0)<70 or item['availability']=='unavailable' or scoring.stale(item):
             item['view']='review'
         else:
             item['view']='relevant'
