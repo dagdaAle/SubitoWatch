@@ -19,6 +19,7 @@ import repository as repo
 import scoring
 import scraper
 import sources
+import images as image_loader
 import storage
 from app import app
 from models import Analysis,ListingInput,TopicInput
@@ -205,6 +206,31 @@ class ExtractionTest(unittest.TestCase):
         with patch.dict(os.environ,{'BUYWATCHER_AI_MODEL':'test','BUYWATCHER_VISION_MODEL':''}),patch('ai.complete',return_value=a):
             with self.assertRaises(RuntimeError):ai.evaluate(topic(),listing())
 
+
+
+    def test_vision_prepares_base64_and_remaps_photo_indexes(self):
+        a=analysis();a['observations']=[{'claim':'Dettaglio','basis':'image','detail':'Foto allegata','image_index':0}]
+        ad=listing();ad['images']=['https://example.com/missing.jpg','https://example.com/visible.jpg']
+        with patch.dict(os.environ,{'BUYWATCHER_AI_MODEL':'test','BUYWATCHER_VISION_MODEL':'vision-test'}),patch('images.prepare',return_value=(['data:image/jpeg;base64,/9j/'],[1])),patch('ai.complete',return_value=a) as complete:
+            result=ai.evaluate(topic(),ad)
+        self.assertEqual(result['observations'][0]['image_index'],1)
+        self.assertEqual(result['images_examined'],1)
+        self.assertEqual(complete.call_args.kwargs['images'][0],'data:image/jpeg;base64,/9j/')
+
+    def test_image_fetch_rejects_private_dns_resolution(self):
+        import socket
+        addresses=[(socket.AF_INET,socket.SOCK_STREAM,6,'',('127.0.0.1',443))]
+        with patch('images.socket.getaddrinfo',return_value=addresses),self.assertRaises(ValueError):
+            image_loader.public_target('https://images.example.com/photo.jpg')
+
+    def test_image_connection_pins_the_resolved_address(self):
+        import socket
+        addresses=[(socket.AF_INET,socket.SOCK_STREAM,6,'',('93.184.216.34',443))]
+        with patch('images.socket.getaddrinfo',return_value=addresses):
+            url,host,sni=image_loader.public_target('https://images.example.com/photo.jpg?q=1')
+        self.assertEqual(url,'https://93.184.216.34/photo.jpg?q=1')
+        self.assertEqual(host,'images.example.com')
+        self.assertEqual(sni,'images.example.com')
 
     def test_ebay_detail_normalizes_official_fields(self):
         raw={'itemId':'v1|123|0','itemWebUrl':'https://www.ebay.it/itm/123','title':'Oggetto',

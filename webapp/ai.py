@@ -7,8 +7,9 @@ import os
 import httpx
 
 from models import Analysis
+import images as image_loader
 
-VERSION = 'buywatcher-1'
+VERSION = 'buywatcher-2'
 
 
 def configured():
@@ -67,7 +68,7 @@ Rispetta lo schema fornito, senza campi aggiuntivi.'''
 
 
 def evaluate(topic, listing):
-    images = listing.get('images', [])[:6] if os.getenv('BUYWATCHER_VISION_MODEL') else []
+    images, indexes = image_loader.prepare(listing.get('images', [])) if os.getenv('BUYWATCHER_VISION_MODEL') else ([], [])
     payload = {'topic':topic, 'listing':{k:v for k,v in listing.items() if k not in ('analysis','error','evaluation_key','content_hash')},
                'attached_images':len(images), 'output_schema':Analysis.model_json_schema()}
     result = Analysis.model_validate(complete(SYSTEM, payload, images=images))
@@ -77,11 +78,14 @@ def evaluate(topic, listing):
         if obs.basis != 'image' and obs.image_index is not None:
             raise RuntimeError('Analisi rifiutata: riferimento fotografico incoerente.')
     body = result.model_dump()
+    for observation in body['observations']:
+        if observation['basis'] == 'image':
+            observation['image_index'] = indexes[observation['image_index']]
     body['images_examined'] = len(images)
     body['model'] = os.getenv('BUYWATCHER_VISION_MODEL') if images else os.environ['BUYWATCHER_AI_MODEL']
     body['version'] = VERSION
-    if not images and listing.get('images'):
-        body['unknowns'].append('Foto disponibili ma non esaminate: modello visivo non configurato.')
+    if len(images) < len(listing.get('images', [])):
+        body['unknowns'].append('Alcune foto non sono state esaminate: modello visivo assente, immagini non accessibili o limite di sei immagini.')
     return body
 
 

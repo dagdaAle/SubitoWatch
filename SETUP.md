@@ -43,10 +43,14 @@ Non è sufficiente che un endpoint accetti una connessione: verifica la restituz
 di JSON valido e la capacità effettiva di leggere immagini con il modello scelto.
 
 Con provider remoto vengono trasmessi bisogno, descrizione, dati del candidato e,
-se configurata la visione, fino a sei URL di foto. Scegli un provider appropriato
-ai dati trattati. Il backend non scarica URL arbitrari inseriti dall’utente;
-il provider visivo deve poter leggere le immagini pubbliche. Immagini protette,
-scadute o non raggiungibili possono far fallire la valutazione.
+se configurata la visione, fino a sei foto codificate in base64. Scegli un provider appropriato
+ai dati trattati. Il backend non visita le pagine annuncio inserite dall’utente. Recupera soltanto
+le immagini pubbliche: massimo 4 MB ciascuna, JPEG/PNG/WebP, fino a sei. Ogni
+connessione è fissata a un IP pubblico dopo controllo DNS; i redirect sono
+ricontrollati e non si usano cookie o proxy. Le foto irraggiungibili vengono
+segnalate come non esaminate; resta disponibile la valutazione testuale.
+Questa conversione permette di usare anche Ollama, che non accetta URL remoti
+come immagini nell’endpoint compatibile.
 
 Se l’AI manca o fallisce, gli annunci rimangono in **Da verificare**, senza giudizi
 sostitutivi. Il pulsante “Valuta in attesa” riprova i candidati senza rifare la raccolta.
