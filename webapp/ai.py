@@ -34,10 +34,11 @@ def complete(system, payload, *, images=None):
     if os.getenv('BUYWATCHER_AI_API_KEY'):
         headers['Authorization'] = 'Bearer '+os.environ['BUYWATCHER_AI_API_KEY']
     try:
-        with httpx.Client(timeout=120, follow_redirects=False) as client:
+        with httpx.Client(timeout=max(30, min(600, int(os.getenv('BUYWATCHER_AI_TIMEOUT', '120')))), follow_redirects=False) as client:
             response = client.post(os.environ['BUYWATCHER_AI_BASE_URL'].rstrip('/')+'/chat/completions',
                 headers=headers, json={'model':model, 'temperature':0,
-                'response_format':{'type':'json_object'}, 'max_tokens':4000,
+                'response_format':{'type':'json_object'}, 'max_tokens':2000,
+                **({'reasoning_effort':os.environ['BUYWATCHER_AI_REASONING_EFFORT']} if os.getenv('BUYWATCHER_AI_REASONING_EFFORT') else {}),
                 'messages':[{'role':'system','content':system}, {'role':'user','content':content}]})
         response.raise_for_status()
         text = response.json()['choices'][0]['message']['content'].strip()

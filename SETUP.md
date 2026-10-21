@@ -32,6 +32,8 @@ Copia `.env.example` in `.env` e configura:
 | `BUYWATCHER_AI_BASE_URL` | URL base completo fino a `/v1` (o equivalente) del server compatibile |
 | `BUYWATCHER_AI_MODEL` | Nome del modello testuale disponibile sul provider |
 | `BUYWATCHER_AI_API_KEY` | Chiave se richiesta, vuota per server locali che non la richiedono |
+| `BUYWATCHER_AI_TIMEOUT` | Timeout inferenza in secondi (30–600), predefinito 120 |
+| `BUYWATCHER_AI_REASONING_EFFORT` | Facoltativo; `none` disattiva il ragionamento esteso nei provider compatibili |
 | `BUYWATCHER_VISION_MODEL` | Modello multimodale con supporto `image_url`; vuoto disabilita analisi foto |
 | `BUYWATCHER_MAX_AI_PER_RUN` | Massimo valutazioni per esecuzione, predefinito 40 |
 | `BUYWATCHER_MAX_DETAILS_PER_SOURCE` | Massimo annunci arricchiti per fonte/esecuzione, predefinito 30 |
@@ -170,3 +172,5 @@ prima di esporla ad altri; non pubblicare direttamente la porta applicativa.
 non certifica accesso live alle fonti né qualità dell’AI. Usa report esecuzioni e
 risultati per la verifica funzionale. Per rollback ripristina immagine precedente
 e backup coerente del database, senza cancellare il volume.
+
+Per healthcheck Coolify di tipo CMD usa `python /app/healthcheck.py`: non richiede curl o wget.
