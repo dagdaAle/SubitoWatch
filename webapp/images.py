@@ -5,13 +5,36 @@ proxies, private addresses, arbitrary ports or non-image payloads are accepted.
 """
 import base64
 import ipaddress
+import io
+import warnings
 import socket
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import httpx
+from PIL import Image, ImageOps, UnidentifiedImageError
 from models import public_url
 
 MAX_BYTES = 4 * 1024 * 1024
+Image.MAX_IMAGE_PIXELS = 20_000_000
+
+
+def normalize_image(content):
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(io.BytesIO(content)) as image:
+                if image.format not in ("JPEG", "PNG", "WEBP", "AVIF"):
+                    raise ValueError("Formato immagine non supportato")
+                image.load()
+                image = ImageOps.exif_transpose(image)
+                image.thumbnail((1600, 1600))
+                image = image.convert("RGB")
+                target = io.BytesIO()
+                image.save(target, format="JPEG", quality=85)
+                return "data:image/jpeg;base64," + base64.b64encode(target.getvalue()).decode("ascii")
+    except (UnidentifiedImageError, OSError, Image.DecompressionBombWarning, Image.DecompressionBombError) as exc:
+        raise ValueError("Immagine non valida o troppo grande") from exc
+
 
 
 def public_target(url):
@@ -49,15 +72,7 @@ def fetch_image(url):
                         raise ValueError('Immagine troppo grande')
                     chunks.append(chunk)
                 content=b''.join(chunks)
-        if content.startswith(b'\xff\xd8\xff'):
-            mime='image/jpeg'
-        elif content.startswith(b'\x89PNG\r\n\x1a\n'):
-            mime='image/png'
-        elif content.startswith(b'RIFF') and content[8:12]==b'WEBP':
-            mime='image/webp'
-        else:
-            raise ValueError('Formato immagine non supportato')
-        return 'data:'+mime+';base64,'+base64.b64encode(content).decode('ascii')
+        return normalize_image(content)
     raise ValueError('Troppi reindirizzamenti immagine')
 
 

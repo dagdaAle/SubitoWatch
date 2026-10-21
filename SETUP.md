@@ -47,7 +47,8 @@ di JSON valido e la capacità effettiva di leggere immagini con il modello scelt
 Con provider remoto vengono trasmessi bisogno, descrizione, dati del candidato e,
 se configurata la visione, fino a sei foto codificate in base64. Scegli un provider appropriato
 ai dati trattati. Il backend non visita le pagine annuncio inserite dall’utente. Recupera soltanto
-le immagini pubbliche: massimo 4 MB ciascuna, JPEG/PNG/WebP, fino a sei. Ogni
+le immagini pubbliche: massimo 4 MB ciascuna, JPEG/PNG/WebP/AVIF, fino a sei. Le immagini
+sono validate, limitate a 20 megapixel e normalizzate a JPEG entro 1600×1600 pixel. Ogni
 connessione è fissata a un IP pubblico dopo controllo DNS; i redirect sono
 ricontrollati e non si usano cookie o proxy. Le foto irraggiungibili vengono
 segnalate come non esaminate; resta disponibile la valutazione testuale.
@@ -174,3 +175,5 @@ risultati per la verifica funzionale. Per rollback ripristina immagine precedent
 e backup coerente del database, senza cancellare il volume.
 
 Per healthcheck Coolify di tipo CMD usa `python /app/healthcheck.py`: non richiede curl o wget.
+
+Per risposte JSON con Qwen3-VL usa un tag esplicito Instruct, ad esempio `qwen3-vl:4b-instruct`; il tag generico può puntare alla variante Thinking e consumare il limite senza produrre una risposta finale.

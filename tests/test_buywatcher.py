@@ -208,6 +208,19 @@ class ExtractionTest(unittest.TestCase):
 
 
 
+
+    def test_image_formats_normalized_for_vision(self):
+        import io,base64
+        from PIL import Image
+        for fmt in ("PNG","WEBP","AVIF"):
+            with self.subTest(format=fmt):
+                raw=io.BytesIO();Image.new("RGB",(30,20),(60,100,140)).save(raw,format=fmt)
+                value=image_loader.normalize_image(raw.getvalue())
+                self.assertTrue(value.startswith("data:image/jpeg;base64,"))
+                normalized=Image.open(io.BytesIO(base64.b64decode(value.split(",",1)[1])))
+                self.assertEqual(normalized.size,(30,20))
+        with self.assertRaises(ValueError):image_loader.normalize_image(b"<html>not an image</html>")
+
     def test_vision_prepares_base64_and_remaps_photo_indexes(self):
         a=analysis();a['observations']=[{'claim':'Dettaglio','basis':'image','detail':'Foto allegata','image_index':0}]
         ad=listing();ad['images']=['https://example.com/missing.jpg','https://example.com/visible.jpg']
