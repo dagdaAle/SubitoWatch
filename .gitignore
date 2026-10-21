@@ -15,3 +15,12 @@ subito.db
 *.swp
 .idea/
 .vscode/
+
+# Build, local configuration and runtime data
+node_modules/
+.env
+.env.*
+!.env.example
+*.db-*
+*.sqlite*
+.pytest_cache/

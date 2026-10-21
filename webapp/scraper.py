@@ -49,19 +49,21 @@ def _extract_ads(html: str) -> list[dict[str, Any]]:
     """Pull the ad list out of a Subito search page's __NEXT_DATA__ blob."""
     match = _NEXT_DATA_RE.search(html)
     if not match:
-        return []
+        raise RuntimeError("Formato della pagina Subito non riconosciuto: risultati non verificabili.")
     try:
         data = json.loads(match.group(1))
-    except (ValueError, TypeError):
-        return []
+    except (ValueError, TypeError) as exc:
+        raise RuntimeError("Dati Subito non validi.") from exc
     try:
         items = data["props"]["pageProps"]["initialState"]["items"]
-    except (KeyError, TypeError):
-        return []
+    except (KeyError, TypeError) as exc:
+        raise RuntimeError("Struttura dei risultati Subito cambiata.") from exc
     # originalList is the full result list (30/page); it already includes the
     # gallery items, so we don't merge galleryList/boostedItems to avoid dupes.
     ads = items.get("originalList")
-    return ads if isinstance(ads, list) else []
+    if not isinstance(ads, list):
+        raise RuntimeError("Elenco annunci Subito non riconosciuto.")
+    return ads
 
 
 def _price_of(ad: dict[str, Any]) -> tuple[int | None, str]:
@@ -133,6 +135,7 @@ def _normalize(ad: dict[str, Any]) -> dict[str, Any] | None:
         "date": ad.get("date") or "",
         "thumbnail": _thumb_of(ad),
         "description": ad.get("body") or "",
+        "images": [f"{img['cdnBaseUrl']}?rule={_IMG_RULE}" for img in (ad.get("images") or []) if img and img.get("cdnBaseUrl")][:12],
         "is_shop": is_shop,
         "shop_name": shop_name,
     }
@@ -205,7 +208,7 @@ def search(
     for item in collected:
         if comune_needle and (
             comune_needle not in item["town"].lower()
-            and comune_needle not in item["city"].lower()
+
         ):
             continue
         price = item["price"]
@@ -234,6 +237,7 @@ def search_keywords(
     keyword doesn't sink the others.
     """
     merged: dict[str, dict[str, Any]] = {}
+    failures = []
     for kw in keywords:
         kw = (kw or "").strip()
         if not kw:
@@ -247,7 +251,8 @@ def search_keywords(
                 pages=pages,
             ):
                 merged.setdefault(item["listing_url"], item)
-        except RuntimeError:
-            # Skip a keyword that failed; keep results from the others.
-            continue
+        except RuntimeError as exc:
+            failures.append(str(exc))
+    if failures:
+        raise RuntimeError("Ricerca incompleta: " + "; ".join(failures))
     return list(merged.values())
