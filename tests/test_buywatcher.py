@@ -372,6 +372,17 @@ class ExtractionTest(unittest.TestCase):
 
 
 class ApiTest(DatabaseFixture):
+    def test_topic_summary_counts_use_the_same_cache_key_as_results(self):
+        with TestClient(app) as client:
+            identity=repo.save_listing(self.t['id'],listing())
+            item=repo.matches(self.t['id'])[0]
+            repo.save_evaluation(self.t['id'],identity,'evaluated',analysis(),engine.key_for(self.t,item))
+            result=client.get('/api/topics').json()['topics'][0]
+            self.assertEqual(result['counts'].get('evaluated'),1)
+            self.assertEqual(engine.key_for(self.t,item),engine.key_for(result,item))
+            repo.save_evaluation(self.t['id'],identity,'evaluated',analysis(),item['content_hash']+':old-model')
+            self.assertEqual(client.get('/api/topics').json()['topics'][0]['counts'],{'pending':1})
+
     def test_profile_api_validation_and_roundtrip(self):
         with TestClient(app) as client:
             self.assertEqual(client.get('/api/profile').json()['profile']['clothing_sizes'],[])
@@ -445,6 +456,8 @@ class SizePolicyTest(unittest.TestCase):
             ('Scarpe US 10','unknown'),('Scarpe EU 44 UK 9.5','pass'),
             ('Felpa taglia L','pass'),('Felpa taglia XL','pass'),('Felpa taglia XXL','exclude'),
             ('Felpa taglia M','exclude'),('T-shirt uomo L','pass'),
+            ('Felpa Vans Small','exclude'),('Felpa Extra Large','pass'),
+            ('Scarpe Vans n. 43','exclude'),
             ('Felpa taglia 44','unknown'),('Felpa senza indicazione','unknown')]
         for title,expected in examples:
             with self.subTest(title=title):self.assertEqual(self.assess(title),expected)

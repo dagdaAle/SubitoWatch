@@ -28,11 +28,11 @@ def publication_time(item):
 
 
 def effective_topic(topic):
-    return {**topic,'buyer_profile':personalization.preferences(topic,repo.get_profile())} if topic.get('profile_scope','none')!='none' else topic
+    return {**topic,'buyer_profile':personalization.preferences(topic,repo.get_profile()),'size_policy':personalization.VERSION} if topic.get('profile_scope','none')!='none' else topic
 
 
 def key_for(topic,item):
-    topic=effective_topic(topic)
+    topic={key:value for key,value in effective_topic(topic).items() if key not in ('counts','last_run')}
     return item['content_hash']+':'+repo.digest({'topic':topic,'model':ai.signature(),
         'analysis_allowed':sources.source_config(item['source'])['analysis']})
 

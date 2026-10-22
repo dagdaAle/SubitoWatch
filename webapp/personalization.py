@@ -1,10 +1,12 @@
 """Apply declared sizes without inferring EU/UK conversions or body measurements."""
 import re
 
+VERSION = 'sizes-2'
+
 SHOES = re.compile(r'\b(scarp\w*|sneakers?|stival\w*|sandal\w*|ciabatt\w*|calzatur\w*|old\s+skool|sk8)\b',re.I)
 CLOTHES = re.compile(r'\b(t[ -]?shirt|magliett\w*|felp\w*|giacc\w*|giubbott\w*|gilet|smanicat\w*|pantalon\w*|piumin\w*|camici\w*|bermuda|shorts|maglion\w*|pullover)\b',re.I)
 LETTERS = r'(?:5XL|4XL|3XL|XXXL|XXL|XXS|XL|XS|S|M|L)'
-SIZE_LABEL = r'\b(?:taglia|taglie|tg\.?|size|misura|numero|num\.?)\s*[:.\-]?\s*'
+SIZE_LABEL = r'\b(?:taglia|taglie|tg\.?|size|misura|numero|num\.?|n\.|n°)\s*[:.\-]?\s*'
 
 
 def preferences(topic, profile):
@@ -38,8 +40,12 @@ def assess(topic, listing):
         if wanted in found:return {'status':'pass','reason':f'Taglia dichiarata compatibile con EU {wanted:g}.'}
         return {'status':'exclude','reason':f'Taglie scarpe dichiarate: {", ".join(f"{x:g}" for x in sorted(set(found)))}. Nel tuo profilo cerchi EU {wanted:g}.'}
     if category=='clothing' and profile.get('clothing_sizes'):
-        found=[m.group(1).upper() for m in re.finditer(SIZE_LABEL+rf'({LETTERS}(?:\s*[/–-]\s*{LETTERS})*)(?!\w)',text,re.I)]
-        found += re.findall(rf'(?<![\w])({LETTERS})(?![\w\x27’])',title)
+        aliases={'extra extra large':'XXL','extra large':'XL','extra small':'XS','small':'S','medium':'M','large':'L'}
+        def normalized(value):
+            for label,size in aliases.items():value=re.sub(r'\b'+label+r'\b',size,value,flags=re.I)
+            return value
+        found=[m.group(1).upper() for m in re.finditer(SIZE_LABEL+rf'({LETTERS}(?:\s*[/–-]\s*{LETTERS})*)(?!\w)',normalized(text),re.I)]
+        found += re.findall(rf'(?<![\w])({LETTERS})(?![\w\x27’])',normalized(title))
         sizes={v for part in found for v in re.findall(LETTERS,part)}
         sizes={'3XL' if v=='XXXL' else v for v in sizes}
         wanted=set(profile['clothing_sizes'])
