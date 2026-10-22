@@ -14,7 +14,7 @@ export default function App() {
   const [activeId, setActiveId] = useState<number | null>(null);
   const [items, setItems] = useState<Listing[]>([]);
   const [runs, setRuns] = useState<Run[]>([]);
-  const [view, setView] = useState('relevant');
+  const [view, setView] = useState('all');
   const [search, setSearch] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
@@ -30,6 +30,9 @@ export default function App() {
   const activeRef = useRef(activeId); activeRef.current = activeId;
   const active = topics.find(t => t.id === activeId);
   const running = active?.last_run?.state === 'running';
+  useEffect(() => {
+    if (page==='radar' && !loading && activeId===null && topics.length) setActiveId(topics[0].id);
+  },[page,topics,activeId,loading]);
 
   const load = useCallback(async (id: number | null) => {
     const [c, t, p] = await Promise.all([request<Config>('/api/config'), request<{ topics: Topic[] }>('/api/topics'),request<{profile:BuyerProfile}>('/api/profile')]);
@@ -72,7 +75,7 @@ export default function App() {
       <p className="muted tagline">Trova ciò che ti serve.<br />Capisci se ne vale la pena.</p>
       <button className="primary wide" onClick={() => { setEditing(null); setTopicForm({ ...emptyTopic }); }}>＋ Nuovo topic</button>
       <div className="nav-label">I TUOI TOPIC <span>{topics.length}</span></div>
-      <nav>{topics.map(t => <button key={t.id} className={`topic-link ${page==='radar' && activeId === t.id ? 'active' : ''}`} onClick={() => { window.location.hash='';setPage('radar');setActiveId(t.id); setView('relevant'); }}>
+      <nav>{topics.map(t => <button key={t.id} className={`topic-link ${page==='radar' && activeId === t.id ? 'active' : ''}`} onClick={() => { window.location.hash='';setPage('radar');setActiveId(t.id); setView('all'); }}>
         <span>◉</span><span className="topic-name">{t.name}<small>{t.last_run?.state === 'running' ? 'Ricerca in corso…' : `${t.counts.evaluated ?? 0} valutati · ${t.counts.pending ?? 0} in attesa`}</small></span>
       </button>)}</nav>
       <div className="sidebar-bottom"><button className={`ghost wide ${page==='profile'?'chosen':''}`} onClick={() => {window.location.hash='personalizzazione';setPage('profile');}}>⚙ Personalizzazione</button><button className="ghost wide" onClick={() => setShowSources(true)}>◇ Fonti e configurazione</button><span className={`status-dot ${config?.ai_configured ? 'green' : ''}`} /> AI {config?.ai_configured ? 'configurata' : 'da configurare'}</div>
@@ -94,8 +97,8 @@ export default function App() {
     </main>
     {topicForm && config && <TopicForm initial={topicForm} editing={editing !== null} config={config} onClose={() => setTopicForm(null)} onSave={async body => {
       const result = await request<{ topic: Topic }>(editing === null ? '/api/topics' : `/api/topics/${editing}`, editing === null ? 'POST' : 'PUT', body);
-      setTopicForm(null); setActiveId(result.topic.id); await load(activeId);
-    }} onDelete={editing === null ? undefined : async () => { await request(`/api/topics/${editing}`, 'DELETE'); setTopicForm(null); setActiveId(null); await load(null); }} />}
+      await load(null);setTopicForm(null);setActiveId(result.topic.id);setView('all');window.location.hash='';setPage('radar');await load(result.topic.id);
+    }} onDelete={editing === null ? undefined : async () => { await request(`/api/topics/${editing}`, 'DELETE');await load(null);setTopicForm(null);setActiveId(null); }} />}
     {importing && activeId !== null && <ImportForm onClose={() => setImporting(false)} onSave={async body => { await request(`/api/topics/${activeId}/listings`, 'POST', body); setImporting(false); await load(activeId); setView('review'); }} />}
     {selected && <Detail listing={selected} onClose={() => setSelected(null)} />}
     {showSources && config && <Modal title="Fonti e configurazione" onClose={() => setShowSources(false)}><p className="muted">Testo AI: {config.ai_configured ? 'configurato' : 'da configurare'} · Analisi foto: {config.vision_configured ? 'configurata' : 'da configurare'}. Le credenziali restano sul server.</p>{config.sources.map(s => <div className="source-row" key={s.id}><b>{s.name}</b><span className={`pill ${s.enabled ? 'good' : ''}`}>{s.enabled ? 'Disponibile' : 'Non attiva'}</span><p>{s.detail}</p>{s.policy_url && <a href={s.policy_url} target="_blank" rel="noreferrer">Condizioni della fonte ↗</a>}</div>)}<p className="muted">Configurazione e limiti dei connettori sono descritti nel SETUP.md del progetto. Nessun punteggio economico è garantito senza dati sufficienti.</p></Modal>}

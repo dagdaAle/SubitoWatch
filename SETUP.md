@@ -140,6 +140,10 @@ oppure `fashion`. Le taglie incompatibili dichiarate nel testo vengono escluse
 prima dell'inferenza. Taglie assenti, tipo di capo ambiguo o conversioni UK/US e
 taglie numeriche dell'abbigliamento non verificabili restano da controllare.
 Non si deduce la taglia da fotografie o dal tipo di persona mostrata.
+Le osservazioni fotografiche possono chiarire se l'oggetto è una scarpa o un capo;
+la taglia numerica da confrontare resta quella dichiarata nel testo. Il controllo
+finale delle taglie prevale sul punteggio AI e conserva la motivazione originale
+del modello nei dati dell'analisi, senza richiedere una nuova inferenza.
 
 La modifica delle preferenze invalida soltanto le valutazioni collegate ai campi
 cambiati. Cambiare le taglie dei vestiti non invalida un topic di sole scarpe.

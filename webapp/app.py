@@ -19,6 +19,7 @@ import legacy
 import repository as repo
 import scoring
 import sources
+import personalization
 from models import ListingInput, TopicInput, BuyerProfile
 
 
@@ -72,9 +73,12 @@ def topics():
 
 def current_items(topic):
     items=repo.matches(topic['id'])
+    personalized=engine.effective_topic(topic)
     for item in items:
         if item['state']=='evaluated' and item['evaluation_key']!=engine.key_for(topic,item):
             item.update(state='pending',analysis=None,error='Le preferenze, il topic o il modello sono cambiati: rivaluta l’annuncio.')
+        if item['state']=='evaluated' and item.get('analysis'):
+            item['analysis']=personalization.refine(personalized,item,item['analysis'])
     return items
 
 

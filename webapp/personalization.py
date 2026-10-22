@@ -26,6 +26,8 @@ def assess(topic, listing):
     scope=topic.get('profile_scope','none')
     shoe=bool(SHOES.search(text)); clothing=bool(CLOTHES.search(text))
     category = 'footwear' if scope=='footwear' else 'clothing' if scope=='clothing' else ('footwear' if shoe and not clothing else 'clothing' if clothing and not shoe else None)
+    if category=='footwear' and profile.get('shoe_size_eu') is None:return {'status':'none','reason':''}
+    if category=='clothing' and not profile.get('clothing_sizes'):return {'status':'none','reason':''}
     if category=='footwear' and 'shoe_size_eu' in profile:
         found=[]
         pattern=rf'(?:{SIZE_LABEL}|\bEU\s*)({{number}}(?:\s*[/–-]\s*{{number}})?)'.replace('{number}',r'\d{2}(?:[.,]5)?')
@@ -59,4 +61,27 @@ def annotate(body, verdict):
     body['size_check']=verdict
     if verdict['status']=='unknown' and not body.get('requirement_failures'):
         body['requirement_unknowns']=list(dict.fromkeys([*body.get('requirement_unknowns',[]),verdict['reason']]))
+    return body
+
+
+def refine(topic, listing, analysis):
+    """Use photo evidence for object type, but only seller text for the size."""
+    if topic.get('profile_scope')!='fashion' or not topic.get('buyer_profile'):
+        return analysis
+    original=assess(topic,listing)
+    if original['status']!='unknown' or not analysis.get('images_examined') or analysis.get('confidence',0)<70:
+        return analysis
+    evidence=' '.join(o.get('claim','')+' '+o.get('detail','') for o in analysis.get('observations',[]) if o.get('basis')=='image')
+    shoe=bool(SHOES.search(evidence));clothing=bool(CLOTHES.search(evidence))
+    if shoe==clothing:return analysis
+    verdict=assess({**topic,'profile_scope':'footwear' if shoe else 'clothing'},listing)
+    if verdict['status']=='unknown':return analysis
+    body={**analysis,'size_check':verdict}
+    old_reason=(analysis.get('size_check') or original)['reason']
+    body['requirement_unknowns']=[value for value in analysis.get('requirement_unknowns',[]) if value!=old_reason]
+    if verdict['status']=='exclude':
+        body['relevance']=0
+        body['requirement_failures']=list(dict.fromkeys([*analysis.get('requirement_failures',[]),verdict['reason']]))
+        body['model_reason']=analysis['reason']
+        body['reason']=verdict['reason']
     return body

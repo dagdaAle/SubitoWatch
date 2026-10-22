@@ -447,6 +447,31 @@ class ApiTest(DatabaseFixture):
 
 
 class SizePolicyTest(unittest.TestCase):
+    def test_photo_type_cannot_override_an_incompatible_declared_size(self):
+        topic={'profile_scope':'fashion','buyer_profile':{'shoe_size_eu':44,'clothing_sizes':['L','XL']}}
+        ad={'title':'Vans donna n. 41','description':'Vendo per inutilizzo, numero 41'}
+        original=analysis();original.update(images_examined=1,observations=[{'basis':'image','claim':'Scarpe Vans','detail':'Le immagini mostrano un paio di scarpe nere con lacci','image_index':0}])
+        original['size_check']=personalization.assess(topic,ad)
+        original['requirement_unknowns']=[original['size_check']['reason']]
+        refined=personalization.refine(topic,ad,original)
+        self.assertEqual(refined['relevance'],0)
+        self.assertEqual(refined['size_check']['status'],'exclude')
+        self.assertTrue(refined['requirement_failures'])
+        self.assertEqual(original['relevance'],95)
+
+    def test_photo_label_is_not_used_to_invent_a_missing_declared_size(self):
+        topic={'profile_scope':'fashion','buyer_profile':{'shoe_size_eu':44}}
+        original=analysis();original.update(images_examined=1,observations=[{'basis':'image','claim':'Scarpe Vans','detail':'Scarpe con etichetta che sembra riportare 41','image_index':0}])
+        result=personalization.refine(topic,{'title':'Vans nere','description':'Usate'},original)
+        self.assertEqual(result['relevance'],95)
+
+    def test_clearing_one_preference_disables_only_its_category(self):
+        topic={'profile_scope':'fashion','buyer_profile':{'clothing_sizes':['L','XL']}}
+        self.assertEqual(personalization.assess(topic,{'title':'Scarpe taglia 42'})['status'],'none')
+        topic['buyer_profile']={'shoe_size_eu':44}
+        self.assertEqual(personalization.assess(topic,{'title':'Felpa taglia S'})['status'],'none')
+        self.assertEqual(personalization.assess(topic,{'title':'Scarpe taglia 42'})['status'],'exclude')
+
     def assess(self,title,scope='fashion',description=''):
         return personalization.assess({'profile_scope':scope,'buyer_profile':{'shoe_size_eu':44,'clothing_sizes':['L','XL']}}, {'title':title,'description':description})['status']
 
