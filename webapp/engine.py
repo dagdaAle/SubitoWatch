@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 import ai
 import repository as repo
 import sources
+import personalization
 from models import ListingInput
 
 log=logging.getLogger('buywatcher')
@@ -26,14 +27,21 @@ def publication_time(item):
     return 0
 
 
+def effective_topic(topic):
+    return {**topic,'buyer_profile':personalization.preferences(topic,repo.get_profile())} if topic.get('profile_scope','none')!='none' else topic
+
+
 def key_for(topic,item):
+    topic=effective_topic(topic)
     return item['content_hash']+':'+repo.digest({'topic':topic,'model':ai.signature(),
         'analysis_allowed':sources.source_config(item['source'])['analysis']})
 
 
-def evaluate_pending(topic):
+def evaluate_pending(topic,max_evaluations=None):
     report={'evaluated':0,'cached':0,'pending':0,'errors':0}
     limit=max(1,min(200,int(os.getenv('BUYWATCHER_MAX_AI_PER_RUN','40'))))
+    if max_evaluations is not None:
+        limit=min(limit,max(1,max_evaluations))
     for item in sorted(repo.matches(topic['id']), key=publication_time, reverse=True):
         key=key_for(topic,item)
         if item['state']=='evaluated' and item['evaluation_key']==key:
@@ -48,7 +56,11 @@ def evaluate_pending(topic):
             continue
         repo.save_evaluation(topic['id'],item['id'],'evaluating')
         try:
-            analysis=ai.evaluate(topic,item)
+            analysis=ai.evaluate(effective_topic(topic),item)
+            if key!=key_for(repo.get_topic(topic['id']),item):
+                repo.save_evaluation(topic['id'],item['id'],'pending')
+                report['pending']+=1
+                continue
             saved=repo.save_evaluation(topic['id'],item['id'],'evaluated',analysis,key)
             report['evaluated' if saved else 'pending']+=1
         except Exception:
@@ -59,7 +71,7 @@ def evaluate_pending(topic):
     return report
 
 
-def run(topic_id,run_id,collect=True):
+def run(topic_id,run_id,collect=True,max_evaluations=None):
     report={'sources':{},'evaluation':{}}
     try:
         topic=repo.get_topic(topic_id)
@@ -105,7 +117,7 @@ def run(topic_id,run_id,collect=True):
                 if source_report['errors']:
                     source_report['state']='partial' if source_report['found'] else 'failed'
                 report['sources'][source]=source_report
-        report['evaluation']=evaluate_pending(topic)
+        report['evaluation']=evaluate_pending(topic,max_evaluations)
         bad=any(v['state'] in ('failed','partial','disabled') for v in report['sources'].values())
         evaluation=report['evaluation']
         state='partial' if bad or evaluation['errors'] or evaluation['pending'] else 'success'
@@ -121,10 +133,10 @@ class Worker:
         self.stop=threading.Event()
         self.thread=threading.Thread(target=self.scheduler,daemon=True)
 
-    def submit(self,topic_id,collect=True):
+    def submit(self,topic_id,collect=True,max_evaluations=None):
         run_id=repo.start_run(topic_id)
         if run_id is not None:
-            self.pool.submit(run,topic_id,run_id,collect)
+            self.pool.submit(run,topic_id,run_id,collect,max_evaluations)
         return run_id
 
     def scheduler(self):

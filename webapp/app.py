@@ -7,6 +7,7 @@ import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Literal
+from collections import Counter
 
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
@@ -18,7 +19,7 @@ import legacy
 import repository as repo
 import scoring
 import sources
-from models import ListingInput, TopicInput
+from models import ListingInput, TopicInput, BuyerProfile
 
 
 @asynccontextmanager
@@ -63,7 +64,29 @@ def config():
 
 @app.get('/api/topics')
 def topics():
-    return {'topics':repo.list_topics()}
+    topics=repo.list_topics()
+    for topic in topics:
+        topic['counts']=dict(Counter(item['state'] for item in current_items(topic)))
+    return {'topics':topics}
+
+
+def current_items(topic):
+    items=repo.matches(topic['id'])
+    for item in items:
+        if item['state']=='evaluated' and item['evaluation_key']!=engine.key_for(topic,item):
+            item.update(state='pending',analysis=None,error='Le preferenze, il topic o il modello sono cambiati: rivaluta l’annuncio.')
+    return items
+
+
+@app.get('/api/profile')
+def profile():
+    return {'profile':repo.get_profile()}
+
+
+@app.put('/api/profile')
+def update_profile(body:BuyerProfile):
+    profile,affected=repo.save_profile(body.model_dump())
+    return {'profile':profile,'affected_topic_ids':affected}
 
 
 @app.post('/api/topics',status_code=201)
@@ -99,19 +122,23 @@ def plan_topic(body:PlanInput):
         raise HTTPException(503,'Proposta non disponibile. Configura il modello o compila il topic manualmente.')
 
 
+class RunOptions(BaseModel):
+    max_evaluations:int|None=Field(default=None,ge=1,le=200)
+
+
 @app.post('/api/topics/{topic_id}/refresh',status_code=202)
-def refresh(topic_id:int):
+def refresh(topic_id:int,body:RunOptions|None=None):
     require_topic(topic_id)
-    run_id=app.state.worker.submit(topic_id)
+    run_id=app.state.worker.submit(topic_id,max_evaluations=body.max_evaluations if body else None)
     if run_id is None:
         raise HTTPException(409,'Una ricerca per questo topic è già in corso.')
     return {'run_id':run_id}
 
 
 @app.post('/api/topics/{topic_id}/evaluate',status_code=202)
-def evaluate(topic_id:int):
+def evaluate(topic_id:int,body:RunOptions|None=None):
     require_topic(topic_id)
-    run_id=app.state.worker.submit(topic_id,False)
+    run_id=app.state.worker.submit(topic_id,False,max_evaluations=body.max_evaluations if body else None)
     if run_id is None:
         raise HTTPException(409,'Una valutazione per questo topic è già in corso.')
     return {'run_id':run_id}
@@ -148,12 +175,10 @@ def import_listing(topic_id:int,body:ListingInput):
 @app.get('/api/topics/{topic_id}/listings')
 def listings(topic_id:int):
     topic=require_topic(topic_id)
-    items=repo.matches(topic_id)
+    items=current_items(topic)
     # Never publish stale eBay display data beyond the documented six-hour window.
     items=[i for i in items if i['source']!='ebay' or (datetime.now(timezone.utc)-datetime.fromisoformat(i['last_seen'])).total_seconds()<6*3600]
     for item in items:
-        if item['state']=='evaluated' and item['evaluation_key']!=engine.key_for(topic,item):
-            item.update(state='pending',analysis=None,error='Il topic, il modello o i permessi sono cambiati: rivaluta l’annuncio.')
         item['recommendation']=scoring.recommendation(topic,item,items)
         analysis=item.get('analysis') or {}
         if item['state']!='evaluated':

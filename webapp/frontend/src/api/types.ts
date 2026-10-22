@@ -2,7 +2,9 @@ export interface TopicInput {
   name: string; need: string; keywords: string[]; requirements: string[]; preferences: string[];
   exclusions: string[]; accepted_defects: string; budget: number | null; location: string;
   shipping_allowed: boolean; sources: string[]; relevance_threshold: number; interval_hours: number; active: boolean;
+  profile_scope: 'none' | 'footwear' | 'clothing' | 'fashion';
 }
+export interface BuyerProfile { shoe_size_eu: number | null; clothing_sizes: string[]; revision?: number }
 export interface Run { id: number; state: string; started_at: string; finished_at: string | null;
   report: { sources?: Record<string, { state: string; found: number; errors: string[]; truncated?: boolean }>;
     evaluation?: { evaluated: number; cached: number; pending: number; errors: number }; error?: string } }
@@ -15,6 +17,8 @@ export interface Analysis {
   declared_condition: string[]; observations: { claim: string; basis: string; detail: string; image_index: number | null }[];
   missing_parts: string[]; unknowns: string[]; risks: string[]; questions: string[]; reason: string;
   images_examined: number; model: string; version: string;
+  evaluation_stage?: 'size_filter' | 'text_filter' | 'full_analysis';
+  size_check?: { status: string; reason: string };
 }
 export interface Listing {
   id: number; listing_url: string; source: string; title: string; description: string;

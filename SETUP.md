@@ -128,6 +128,33 @@ un sito al catalogo non lo rende un’integrazione funzionante.
 
 ## 4. Valutazione e suoi limiti
 
+### Personalizzazione delle taglie
+
+La pagina `/#personalizzazione` salva numero di scarpe EU e taglie abbigliamento
+in `bw_profile`, sullo stesso volume persistente. È un profilo condiviso per questa
+installazione, protetta dall'autenticazione esterna, non un sistema multiutente.
+`GET /api/profile` legge le preferenze; `PUT /api/profile` le aggiorna.
+
+Ogni topic sceglie `profile_scope`: `none` (predefinito), `footwear`, `clothing`
+oppure `fashion`. Le taglie incompatibili dichiarate nel testo vengono escluse
+prima dell'inferenza. Taglie assenti, tipo di capo ambiguo o conversioni UK/US e
+taglie numeriche dell'abbigliamento non verificabili restano da controllare.
+Non si deduce la taglia da fotografie o dal tipo di persona mostrata.
+
+La modifica delle preferenze invalida soltanto le valutazioni collegate ai campi
+cambiati. Cambiare le taglie dei vestiti non invalida un topic di sole scarpe.
+Il controllo della cache impedisce di pubblicare valutazioni calcolate con un
+profilo precedente, anche se il salvataggio avviene durante un'inferenza.
+Il salvataggio non avvia ricerche nascoste: rivaluta i topic interessati.
+
+Il filtro iniziale AI decide `exclude` o `inspect` sul testo: distingue, per esempio,
+una GPU singola da un PC completo che la contiene. I candidati compatibili o ambigui
+passano alla valutazione con foto; gli esclusi non consumano analisi fotografiche.
+I filtri iniziali non producono un valore numerico di confidenza calibrata.
+I POST `refresh` ed `evaluate` accettano un corpo facoltativo
+`{"max_evaluations": 6}` per un campione ridotto, sempre entro il limite del server.
+Ripeti `evaluate` fino a esaurire i candidati in attesa per un'analisi completa.
+
 L’AI estrae pertinenza e fatti con schema validato. Non stabilisce un prezzo di
 mercato a memoria. Una violazione di un requisito o pertinenza sotto soglia esclude
 l’annuncio dai consigliati; requisiti non verificati, condizioni sconosciute,

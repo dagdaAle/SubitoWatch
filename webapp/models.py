@@ -45,6 +45,7 @@ class TopicInput(BaseModel):
     relevance_threshold: int = Field(default=70, ge=0, le=100)
     interval_hours: int = Field(default=24, ge=6, le=168)
     active: bool = True
+    profile_scope: Literal['none','footwear','clothing','fashion'] = 'none'
 
     @field_validator('name', 'need')
     @classmethod
@@ -124,3 +125,27 @@ class Analysis(BaseModel):
     questions: list[str] = Field(max_length=10)
     reason: str = Field(max_length=2000)
     # Prices are calculated from source data; the model must never invent them.
+
+
+class TextTriage(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    decision: Literal['exclude','inspect']
+    reason: str = Field(max_length=600)
+
+
+class BuyerProfile(BaseModel):
+    model_config = ConfigDict(extra='forbid',allow_inf_nan=False)
+    shoe_size_eu: float | None = Field(default=None,ge=15,le=55)
+    clothing_sizes: list[Literal['XXS','XS','S','M','L','XL','XXL','3XL','4XL','5XL']] = Field(default_factory=list,max_length=10)
+
+    @field_validator('shoe_size_eu')
+    @classmethod
+    def half_size(cls,value):
+        if value is not None and value*2 != int(value*2):
+            raise ValueError('Usa una taglia EU intera o mezza taglia')
+        return value
+
+    @field_validator('clothing_sizes')
+    @classmethod
+    def unique_sizes(cls,values):
+        return [size for size in ['XXS','XS','S','M','L','XL','XXL','3XL','4XL','5XL'] if size in values]

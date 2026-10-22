@@ -14,6 +14,7 @@ os.chdir(Path(__file__).resolve().parents[1]/'webapp')
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 import ai
+import personalization
 import engine
 import repository as repo
 import scoring
@@ -38,6 +39,10 @@ def analysis(**kw):
     return Analysis.model_validate(dict(relevance=95,confidence=90,product_key='marca modello test',configuration='kit completo',
         condition_grade='good',requirement_failures=[],requirement_unknowns=[],declared_condition=['Buone condizioni'],
         observations=[],missing_parts=[],unknowns=[],risks=[],questions=[],reason='Corrisponde al modello e alla configurazione richiesti',**kw)).model_dump()
+
+
+def triage_pass():
+    return ai.TextTriage(decision='inspect',reason='Tipo di oggetto compatibile; verificare le foto.')
 
 
 class DatabaseFixture(unittest.TestCase):
@@ -99,6 +104,49 @@ class DatabaseTest(DatabaseFixture):
         self.assertEqual(engine.publication_time({'published_at':'invalid','first_seen':'2026-10-20T10:00:00Z'}),
                          engine.publication_time({'published_at':'2026-10-20T12:00:00+02:00'}))
         self.assertEqual(engine.publication_time({}),0)
+
+    def test_requested_sample_cannot_exceed_server_budget(self):
+        for n in range(3):repo.save_listing(self.t['id'],listing(n))
+        with patch.dict(os.environ,{'BUYWATCHER_MAX_AI_PER_RUN':'2'}),patch('ai.configured',return_value=True),patch('ai.evaluate',return_value=analysis()) as evaluate:
+            self.assertEqual(engine.evaluate_pending(self.t,max_evaluations=1)['evaluated'],1)
+            self.assertEqual(engine.evaluate_pending(self.t,max_evaluations=200)['evaluated'],2)
+        self.assertEqual(evaluate.call_count,3)
+
+    def test_profile_persists_and_only_invalidates_connected_topics(self):
+        fashion=repo.save_topic(topic(profile_scope='fashion'))
+        for t in (self.t,fashion):
+            identity=repo.save_listing(t['id'],listing())
+            item=repo.matches(t['id'])[0]
+            repo.save_evaluation(t['id'],identity,'evaluated',analysis(),engine.key_for(t,item))
+        saved,affected=repo.save_profile({'shoe_size_eu':44,'clothing_sizes':['L','XL','L']})
+        self.assertEqual(saved['clothing_sizes'],['L','XL'])
+        self.assertEqual(repo.get_profile()['shoe_size_eu'],44)
+        self.assertEqual(affected,[fashion['id']])
+        self.assertEqual(repo.matches(self.t['id'])[0]['state'],'evaluated')
+        self.assertEqual(repo.matches(fashion['id'])[0]['state'],'pending')
+        same,affected=repo.save_profile({'shoe_size_eu':44,'clothing_sizes':['L','XL']})
+        self.assertEqual(same['revision'],saved['revision']);self.assertEqual(affected,[])
+
+    def test_clothing_changes_do_not_invalidate_footwear_cache(self):
+        footwear=repo.save_topic(topic(profile_scope='footwear'))
+        repo.save_profile({'shoe_size_eu':44,'clothing_sizes':['L']})
+        repo.save_listing(footwear['id'],listing())
+        item=repo.matches(footwear['id'])[0];key=engine.key_for(footwear,item)
+        saved,affected=repo.save_profile({'shoe_size_eu':44,'clothing_sizes':['XL']})
+        self.assertEqual(affected,[])
+        self.assertEqual(engine.key_for(footwear,item),key)
+
+    def test_profile_change_during_inference_cannot_publish_stale_sizes(self):
+        t=repo.save_topic(topic(profile_scope='footwear'))
+        repo.save_profile({'shoe_size_eu':44,'clothing_sizes':[]})
+        repo.save_listing(t['id'],listing())
+        def changed(*args):
+            repo.save_profile({'shoe_size_eu':45,'clothing_sizes':[]})
+            return analysis()
+        with patch('ai.configured',return_value=True),patch('ai.evaluate',side_effect=changed):
+            result=engine.evaluate_pending(t)
+        self.assertEqual(result['pending'],1)
+        self.assertEqual(repo.matches(t['id'])[0]['state'],'pending')
 
     def test_old_inference_cannot_overwrite_new_content(self):
         i=repo.save_listing(self.t['id'],listing())
@@ -217,8 +265,26 @@ class ExtractionTest(unittest.TestCase):
 
     def test_photo_evidence_requires_attached_images(self):
         a=analysis();a['observations']=[{'claim':'Danno','basis':'image','detail':'Foto 1','image_index':0}]
-        with patch.dict(os.environ,{'BUYWATCHER_AI_MODEL':'test','BUYWATCHER_VISION_MODEL':''}),patch('ai.complete',return_value=a):
+        with patch.dict(os.environ,{'BUYWATCHER_AI_MODEL':'test','BUYWATCHER_VISION_MODEL':''}),patch('ai.triage',return_value=triage_pass()),patch('ai.complete',return_value=a):
             with self.assertRaises(RuntimeError):ai.evaluate(topic(),listing())
+
+    def test_certain_text_exclusion_skips_photo_download_and_analysis(self):
+        result={'decision':'exclude','reason':'Si vende un PC completo, non la singola scheda.'}
+        with patch.dict(os.environ,{'BUYWATCHER_AI_MODEL':'text-test','BUYWATCHER_VISION_MODEL':'vision-test'}),patch('ai.complete',return_value=result) as complete,patch('images.prepare') as prepare:
+            body=ai.evaluate(topic(),listing(images=['https://example.com/photo.jpg']))
+        self.assertEqual(body['relevance'],0)
+        self.assertEqual(body['evaluation_stage'],'text_filter')
+        self.assertEqual(body['images_examined'],0)
+        self.assertEqual(complete.call_count,1)
+        prepare.assert_not_called()
+
+    def test_ambiguous_text_continues_to_photo_analysis(self):
+        result=triage_pass().model_dump()
+        with patch.dict(os.environ,{'BUYWATCHER_AI_MODEL':'text-test','BUYWATCHER_VISION_MODEL':'vision-test'}),patch('ai.complete',side_effect=[result,analysis()]) as complete,patch('images.prepare',return_value=([],[])) as prepare:
+            body=ai.evaluate(topic(),listing())
+        self.assertEqual(body['evaluation_stage'],'full_analysis')
+        self.assertEqual(complete.call_count,2)
+        prepare.assert_called_once()
 
     def test_generation_schema_only_allows_existing_photo_indexes(self):
         variants=ai.analysis_schema(2)['$defs']['Evidence']['anyOf']
@@ -259,7 +325,7 @@ class ExtractionTest(unittest.TestCase):
     def test_vision_prepares_base64_and_remaps_photo_indexes(self):
         a=analysis();a['observations']=[{'claim':'Dettaglio','basis':'image','detail':'Foto allegata','image_index':0}]
         ad=listing();ad['images']=['https://example.com/missing.jpg','https://example.com/visible.jpg']
-        with patch.dict(os.environ,{'BUYWATCHER_AI_MODEL':'test','BUYWATCHER_VISION_MODEL':'vision-test'}),patch('images.prepare',return_value=(['data:image/jpeg;base64,/9j/'],[1])),patch('ai.complete',return_value=a) as complete:
+        with patch.dict(os.environ,{'BUYWATCHER_AI_MODEL':'test','BUYWATCHER_VISION_MODEL':'vision-test'}),patch('ai.triage',return_value=triage_pass()),patch('images.prepare',return_value=(['data:image/jpeg;base64,/9j/'],[1])),patch('ai.complete',return_value=a) as complete:
             result=ai.evaluate(topic(),ad)
         self.assertEqual(result['observations'][0]['image_index'],1)
         self.assertEqual(result['images_examined'],1)
@@ -306,6 +372,26 @@ class ExtractionTest(unittest.TestCase):
 
 
 class ApiTest(DatabaseFixture):
+    def test_profile_api_validation_and_roundtrip(self):
+        with TestClient(app) as client:
+            self.assertEqual(client.get('/api/profile').json()['profile']['clothing_sizes'],[])
+            self.assertEqual(client.put('/api/profile',json={'shoe_size_eu':44.25,'clothing_sizes':['L']}).status_code,422)
+            self.assertEqual(client.put('/api/profile',json={'shoe_size_eu':44,'clothing_sizes':['invalid']}).status_code,422)
+            response=client.put('/api/profile',json={'shoe_size_eu':44,'clothing_sizes':['L','XL']})
+            self.assertEqual(response.status_code,200)
+            self.assertEqual(client.get('/api/profile').json()['profile']['clothing_sizes'],['L','XL'])
+
+    def test_run_sample_budget_validation_and_forwarding(self):
+        with TestClient(app) as client:
+            path=f"/api/topics/{self.t['id']}"
+            self.assertEqual(client.post(path+'/evaluate',json={'max_evaluations':0}).status_code,422)
+            self.assertEqual(client.post(path+'/refresh',json={'max_evaluations':201}).status_code,422)
+            with patch.object(app.state.worker,'submit',return_value=999) as submit:
+                self.assertEqual(client.post(path+'/refresh',json={'max_evaluations':6}).status_code,202)
+                submit.assert_called_with(self.t['id'],max_evaluations=6)
+                self.assertEqual(client.post(path+'/evaluate').status_code,202)
+                submit.assert_called_with(self.t['id'],False,max_evaluations=None)
+
     def test_unknown_condition_and_missing_parts_require_review(self):
         with TestClient(app) as client:
             identity=repo.save_listing(self.t['id'],listing())
@@ -347,6 +433,35 @@ class ApiTest(DatabaseFixture):
             repo.save_evaluation(self.t['id'],item['id'],'evaluated',analysis(),'old-config')
             result=client.get(f"/api/topics/{self.t['id']}/listings").json()['listings'][0]
             self.assertEqual(result['state'],'pending');self.assertIsNone(result['analysis'])
+
+
+class SizePolicyTest(unittest.TestCase):
+    def assess(self,title,scope='fashion',description=''):
+        return personalization.assess({'profile_scope':scope,'buyer_profile':{'shoe_size_eu':44,'clothing_sizes':['L','XL']}}, {'title':title,'description':description})['status']
+
+    def test_declared_sizes_are_filtered_without_converting_or_guessing(self):
+        examples=[('Scarpe Vans taglia 44','pass'),('Vans Old Skool tg.46','exclude'),
+            ('Scarpe taglia 44,5','exclude'),('Scarpe num. 29 / 30','exclude'),
+            ('Scarpe US 10','unknown'),('Scarpe EU 44 UK 9.5','pass'),
+            ('Felpa taglia L','pass'),('Felpa taglia XL','pass'),('Felpa taglia XXL','exclude'),
+            ('Felpa taglia M','exclude'),('T-shirt uomo L','pass'),
+            ('Felpa taglia 44','unknown'),('Felpa senza indicazione','unknown')]
+        for title,expected in examples:
+            with self.subTest(title=title):self.assertEqual(self.assess(title),expected)
+        self.assertEqual(self.assess('Server con RAM 44 GB',scope='none'),'none')
+
+    def test_size_exclusion_skips_all_inference(self):
+        t=topic(profile_scope='footwear');t['buyer_profile']={'shoe_size_eu':44}
+        ad=listing();ad['title']='Scarpe taglia 42'
+        with patch.dict(os.environ,{'BUYWATCHER_AI_MODEL':'test'}),patch('ai.complete') as complete,patch('images.prepare') as prepare:
+            body=ai.evaluate(t,ad)
+        self.assertEqual(body['evaluation_stage'],'size_filter')
+        self.assertTrue(body['requirement_failures'])
+        complete.assert_not_called();prepare.assert_not_called()
+
+    def test_unknown_size_remains_a_requirement_to_verify(self):
+        body=personalization.annotate(analysis(),{'status':'unknown','reason':'Taglia non nota'})
+        self.assertIn('Taglia non nota',body['requirement_unknowns'])
 
 
 if __name__=='__main__':unittest.main()

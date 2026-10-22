@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import storage
+from models import BuyerProfile
 
 _LOCK = threading.RLock()
 
@@ -69,11 +70,41 @@ def init_db():
             listing_id INTEGER NOT NULL REFERENCES bw_listings(id), verdict TEXT NOT NULL,
             PRIMARY KEY(topic_id, listing_id)
         );
+        CREATE TABLE IF NOT EXISTS bw_profile (
+            id INTEGER PRIMARY KEY CHECK(id=1), body TEXT NOT NULL,
+            revision INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL
+        );
         ''')
         # Restart recovery; network work is never continued with an abandoned lock.
         db.execute("UPDATE bw_runs SET state='interrupted', finished_at=? WHERE state='running'", (now(),))
         db.execute("UPDATE bw_matches SET state='pending' WHERE state='evaluating'")
     migrate_legacy()
+
+
+def get_profile():
+    with connect() as db:
+        row=db.execute('SELECT * FROM bw_profile WHERE id=1').fetchone()
+    return {**(json.loads(row['body']) if row else BuyerProfile().model_dump()),
+            'revision':row['revision'] if row else 0}
+
+
+def save_profile(body):
+    body=BuyerProfile.model_validate(body).model_dump()
+    with connect() as db:
+        row=db.execute('SELECT body FROM bw_profile WHERE id=1').fetchone()
+        before=json.loads(row['body']) if row else BuyerProfile().model_dump()
+        changed={key for key in body if body[key]!=before[key]}
+        if not changed:return get_profile(),[]
+        db.execute('''INSERT INTO bw_profile(id,body,revision,updated_at) VALUES(1,?,1,?)
+            ON CONFLICT(id) DO UPDATE SET body=excluded.body,revision=bw_profile.revision+1,updated_at=excluded.updated_at''',
+            (json.dumps(body),now()))
+        affected=[]
+        for row in db.execute('SELECT id,body FROM bw_topics').fetchall():
+            scope=json.loads(row['body']).get('profile_scope','none')
+            if (scope in ('fashion','footwear') and 'shoe_size_eu' in changed) or (scope in ('fashion','clothing') and 'clothing_sizes' in changed):
+                affected.append(row['id'])
+                db.execute("UPDATE bw_matches SET state='pending',analysis=NULL,evaluation_key=NULL,error=NULL,evaluated_at=NULL WHERE topic_id=?",(row['id'],))
+    return get_profile(),affected
 
 
 def migrate_legacy():
