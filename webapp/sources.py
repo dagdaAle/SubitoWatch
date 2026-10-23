@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import time
 from html.parser import HTMLParser
+from urllib.parse import urlencode
 
 
 class _Text(HTMLParser):
@@ -49,7 +50,10 @@ def catalog():
         dict(id='ebay',name='eBay',enabled=ebay,automatic=True,analysis=flag('EBAY_ANALYSIS_ALLOWED'),pricing=False,
              detail='Browse API ufficiale. Analisi AI e prezzi richiedono verifica separata dei termini; risultati in sezione dedicata.'),
         dict(id='vinted',name='Vinted',enabled=False,automatic=False,analysis=False,pricing=False,
-             detail='Accesso automatizzato non attivato: serve un percorso autorizzato.',policy_url='https://www.vinted.it/terms-and-conditions'),
+             detail='Ricerche esterne per topic. Raccolta automatica non attiva: serve un percorso autorizzato.',policy_url='https://www.vinted.it/terms-and-conditions'),
+        dict(id='facebook',name='Facebook Marketplace',enabled=False,automatic=False,analysis=False,pricing=False,
+             detail='Ricerche esterne per topic. Nessuna raccolta automatica: accesso e località si gestiscono su Facebook.',
+             policy_url='https://www.facebook.com/legal/automated_data_collection_terms'),
         dict(id='wallapop',name='Wallapop',enabled=False,automatic=False,analysis=False,pricing=False,
              detail='Connettore da verificare: nessuna integrazione attiva.'),
         dict(id='astrosell',name='Astrosell',enabled=False,automatic=False,analysis=False,pricing=False,
@@ -60,6 +64,23 @@ def catalog():
 
 def source_config(source):
     return next(s for s in catalog() if s['id']==source)
+
+
+def marketplace_searches(topic):
+    """Generate navigation links only. Never fetch external pages or change AI cache keys."""
+    configs={source['id']:source for source in catalog()}
+    definitions=[('vinted','https://www.vinted.it/catalog','search_text'),
+                 ('ebay','https://www.ebay.it/sch/i.html','_nkw'),
+                 ('facebook','https://www.facebook.com/marketplace/search/','query')]
+    result=[]
+    for identity,base,param in definitions:
+        config=configs[identity]
+        monitoring=config['enabled'] and config['automatic'] and identity in topic['sources']
+        result.append({'id':identity,'name':config['name'],'monitoring':monitoring,
+            'status':'automatic' if monitoring else 'setup' if identity=='ebay' else 'external',
+            'searches':[{'query':keyword,'url':base+'?'+urlencode({param:keyword})}
+                        for keyword in topic['keywords']]})
+    return result
 
 
 class Ebay:

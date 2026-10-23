@@ -82,6 +82,11 @@ def current_items(topic):
     return items
 
 
+@app.get('/api/topics/{topic_id}/marketplaces')
+def marketplaces(topic_id:int):
+    return {'marketplaces':sources.marketplace_searches(require_topic(topic_id))}
+
+
 @app.get('/api/profile')
 def profile():
     return {'profile':repo.get_profile()}

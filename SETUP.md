@@ -115,16 +115,31 @@ Fonti ufficiali, consultate il 21 ottobre 2026:
 - https://developer.ebay.com/join/api-license-agreement
 - https://ebaypartnernetwork.ebay.com/page/developer-questionnaire
 
-### Fonti future
+### Vinted e Facebook Marketplace: ricerche esterne
 
-Vinted, Wallapop e Astrosell sono mostrate come **non attive**. Non ci sono endpoint
-privati travestiti da API pubbliche. Vinted vieta scraping non autorizzato;
-Astrosell richiede autorizzazione scritta per accesso automatizzato. Aggiungere
-un sito al catalogo non lo rende un’integrazione funzionante.
+Ogni topic mostra un pannello con collegamenti alle ricerche Vinted, eBay e
+Facebook Marketplace per ciascuna parola chiave. `GET /api/topics/{id}/marketplaces`
+restituisce URL codificati e stato della raccolta, senza richieste ai siti esterni.
+I collegamenti non applicano automaticamente taglie, località, distanza o budget:
+questi filtri si controllano sulla piattaforma. Le taglie del profilo sono mostrate
+come promemoria nei topic collegati.
+
+Vinted e Facebook non hanno un connettore automatico attivo. Non vengono richieste
+password, cookie o sessioni degli account. Per Vinted serve verificare un percorso
+autorizzato; per Facebook serve un accesso esplicitamente autorizzato da Meta.
+Il pulsante di inserimento permette la valutazione dei dati forniti dall'utente:
+il solo URL non importa testo e foto, e la fonte resta identificata come manuale.
+
+Il collegamento eBay resta disponibile anche senza credenziali. La raccolta eBay
+è indicata come configurata solo se ci sono le credenziali e il topic include eBay;
+questo non certifica la validità del token né abilita automaticamente l'analisi AI.
+Le credenziali si impostano esclusivamente sul server in Coolify; non nel frontend.
+
+Wallapop e Astrosell restano nel catalogo come fonti future non attive.
 
 - https://www.vinted.it/terms-and-conditions
+- https://www.facebook.com/legal/automated_data_collection_terms
 - https://www.astrosell.it/condizioni_utilizzo.php
-- https://about.wallapop.com/it/termini-e-condizioni-duso-di-wallapop/
 
 ## 4. Valutazione e suoi limiti
 

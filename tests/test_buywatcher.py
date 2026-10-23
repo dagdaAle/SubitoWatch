@@ -6,6 +6,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from urllib.parse import urlsplit, parse_qs
 from unittest.mock import patch
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'webapp'))
@@ -369,6 +370,44 @@ class ExtractionTest(unittest.TestCase):
             with self.subTest(url=url),self.assertRaises(ValidationError):ListingInput(listing_url=url,title='test')
         with self.assertRaises(ValidationError):TopicInput(name=' ',need='test',keywords=['x'])
         with self.assertRaises(ValidationError):TopicInput(name='test',need='test',keywords=[' '])
+
+
+class MarketplaceTest(DatabaseFixture):
+    def test_search_links_preserve_query_without_injecting_parameters(self):
+        t=topic();t['keywords']=['Vans & North Face + 44 / XL?']
+        links=sources.marketplace_searches(t)
+        expected={'vinted':('www.vinted.it','search_text'),'ebay':('www.ebay.it','_nkw'),'facebook':('www.facebook.com','query')}
+        for source in links:
+            host,param=expected[source['id']]
+            url=urlsplit(source['searches'][0]['url'])
+            self.assertEqual(url.scheme,'https');self.assertEqual(url.hostname,host)
+            self.assertEqual(parse_qs(url.query),{param:t['keywords']})
+            self.assertFalse(source['monitoring'])
+
+    def test_ebay_monitoring_requires_credentials_and_topic_selection(self):
+        t=topic(sources=['ebay'])
+        def ebay():return next(s for s in sources.marketplace_searches(t) if s['id']=='ebay')
+        self.assertEqual(ebay()['status'],'setup')
+        with patch.dict(os.environ,{'EBAY_CLIENT_ID':'test','EBAY_CLIENT_SECRET':'test'}):
+            self.assertTrue(ebay()['monitoring'])
+            self.assertFalse(sources.source_config('ebay')['analysis'])
+            t['sources']=['manual']
+            self.assertFalse(ebay()['monitoring'])
+            for identity in ('vinted','facebook'):
+                self.assertFalse(sources.source_config(identity)['automatic'])
+                self.assertFalse(sources.source_config(identity)['enabled'])
+
+    def test_marketplace_endpoint_is_read_only_and_never_collects(self):
+        with TestClient(app) as client,patch('sources.search') as search:
+            before=repo.get_topic(self.t['id'])
+            key=engine.key_for(before,{'content_hash':'test','source':'manual'})
+            response=client.get(f"/api/topics/{self.t['id']}/marketplaces")
+            self.assertEqual(response.status_code,200)
+            self.assertEqual(len(response.json()['marketplaces']),3)
+            search.assert_not_called()
+            self.assertEqual(repo.get_topic(self.t['id']),before)
+            self.assertEqual(engine.key_for(repo.get_topic(self.t['id']),{'content_hash':'test','source':'manual'}),key)
+            self.assertEqual(client.get('/api/topics/999999/marketplaces').status_code,404)
 
 
 class ApiTest(DatabaseFixture):

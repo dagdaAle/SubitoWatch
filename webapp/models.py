@@ -7,7 +7,7 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-SOURCES = ('manual', 'subito', 'ebay', 'vinted', 'wallapop', 'astrosell')
+SOURCES = ('manual', 'subito', 'ebay', 'vinted', 'facebook', 'wallapop', 'astrosell')
 
 
 def public_url(value: str) -> str:
