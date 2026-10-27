@@ -74,7 +74,7 @@ export default function App() {
     <aside className="sidebar">
       <a className="brand" href="/" aria-label="BuyWatcher home"><span className="brand-mark">◎</span> BuyWatcher</a>
       <p className="muted tagline">Trova ciò che ti serve.<br />Capisci se ne vale la pena.</p>
-      <button className="primary wide" onClick={() => { setEditing(null); setTopicForm({ ...emptyTopic }); }}>＋ Nuovo topic</button>
+      <button className="primary wide" onClick={() => { setEditing(null); setTopicForm({ ...emptyTopic, sources: config ? config.sources.filter(s => s.enabled && ['manual','subito','ebay','vinted'].includes(s.id)).map(s => s.id) : emptyTopic.sources }); }}>＋ Nuovo topic</button>
       <div className="nav-label">I TUOI TOPIC <span>{topics.length}</span></div>
       <nav>{topics.map(t => <button key={t.id} className={`topic-link ${page==='radar' && activeId === t.id ? 'active' : ''}`} onClick={() => { window.location.hash='';setPage('radar');setActiveId(t.id); setView('all'); }}>
         <span>◉</span><span className="topic-name">{t.name}<small>{t.last_run?.state === 'running' ? 'Ricerca in corso…' : `${t.counts.evaluated ?? 0} valutati · ${t.counts.pending ?? 0} in attesa`}</small></span>
