@@ -113,8 +113,10 @@ def run(topic_id,run_id,collect=True,max_evaluations=None):
                             listing=ListingInput.model_validate(sources.enrich(source,raw)).model_dump()
                             repo.save_listing(topic_id,listing)
                             source_report['found']+=1
-                        except Exception:
+                        except Exception as exc:
                             source_report['errors'].append('Dettagli di un annuncio non recuperabili.')
+                            log.warning('Listing enrich failed: source=%s topic=%s keys=%s error=%r',
+                                        source,topic_id,sorted(raw)[:40],exc)
                         if source=='ebay':
                             time.sleep(0.2)
                     # Pacing: Vinted gets 2s between keywords; other sources keep 1s.
