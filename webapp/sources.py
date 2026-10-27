@@ -235,28 +235,43 @@ class Vinted:
         return items
 
     def enrich(self, raw):
+        # Catalogue payloads vary between API versions: accept nested objects,
+        # relative URLs and photo lists instead of failing the whole listing.
+        def text(value):
+            if isinstance(value, dict):
+                value = value.get('title') or value.get('name') or value.get('label') or ''
+            return str(value or '').strip()
+        def absolute(value):
+            value = text(value) if not isinstance(value, str) else value.strip()
+            if value.startswith('//'):
+                return 'https:' + value
+            if value.startswith('/'):
+                return VINTED_SITE + value
+            return value
         price = raw.get('price') or {}
-        fee = raw.get('service_fee') or {}
         user = raw.get('user') or {}
-        photo = raw.get('photo') or {}
-        title = raw.get('title') or ''
-        brand = raw.get('brand_title') or ''
-        size = raw.get('size_title') or ''
+        photos = [raw.get('photo')] + list(raw.get('photos') or [])
+        images = [absolute(p.get('url') or p.get('full_size_url') or '') for p in photos if isinstance(p, dict)]
+        item_id = str(raw.get('id') or '')
+        url = absolute(raw.get('url') or raw.get('path') or '') or (f'{VINTED_SITE}/items/{item_id}' if item_id else '')
+        title = text(raw.get('title'))
+        brand = text(raw.get('brand_title') or raw.get('brand'))
+        size = text(raw.get('size_title') or raw.get('size'))
         return ListingInput(
-            listing_url=raw.get('url') or '',
-            title=title or (raw.get('url') or 'Annuncio Vinted'),
+            listing_url=url,
+            title=(title or 'Annuncio Vinted')[:500],
             description=' '.join(part for part in (title, brand, size) if part),
             price=_amount(price),
-            fees=_amount(fee),
+            fees=_amount(raw.get('service_fee')),
             currency=(price.get('currency_code') or 'EUR') if isinstance(price, dict) else 'EUR',
             shipping_cost=None,
-            images=[photo['url']] if isinstance(photo, dict) and photo.get('url') else [],
-            condition=str(raw.get('status') or ''),
-            seller=str(user.get('login') or ''),
-            is_shop=bool(user.get('business')),
+            images=list(dict.fromkeys(i for i in images if i.startswith('http')))[:12],
+            condition=text(raw.get('status')),
+            seller=text(user.get('login')) if isinstance(user, dict) else '',
+            is_shop=bool(user.get('business')) if isinstance(user, dict) else False,
             buying_format='fixed',
             source='vinted',
-            external_id=str(raw.get('id') or ''),
+            external_id=item_id,
             availability='active',
         ).model_dump()
 
