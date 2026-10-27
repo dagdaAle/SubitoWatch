@@ -66,7 +66,7 @@ def recommendation(topic, item, peers):
     for other in peers:
         a=other.get('analysis') or {}
         # Separate eBay pricing data from other sources and never duplicate a URL.
-        if other['id']==item['id'] or other['listing_url'] in seen or other['source']=='ebay' or item['source']=='ebay':
+        if other['id']==item['id'] or other['listing_url'] in seen or other['source'] in ('ebay','vinted') or item['source'] in ('ebay','vinted'):
             continue
         if other['state']!='evaluated' or stale(other) or other['availability']=='unavailable' or other['buying_format']!='fixed':
             continue

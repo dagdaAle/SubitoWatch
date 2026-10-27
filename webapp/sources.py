@@ -32,12 +32,28 @@ def plain_text(value):
 
 import httpx
 
+from curl_cffi import requests as cffi
+
 import scraper
 from models import ListingInput
 
 
 def flag(name):
     return os.getenv(name,'').lower() in ('1','true','yes')
+
+
+class SourceError(RuntimeError):
+    """A source failed for a reason safe to show the user."""
+
+
+def _amount(value):
+    """Parse a Vinted money field ({"amount": "3.0"} or a bare number) into a float."""
+    if isinstance(value, dict):
+        value = value.get('amount')
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def catalog():
@@ -49,8 +65,9 @@ def catalog():
              detail='Connettore esistente, provincia di Verona, una pagina per ricerca. Attivazione esplicita dopo verifica dell’accesso.'),
         dict(id='ebay',name='eBay',enabled=ebay,automatic=True,analysis=flag('EBAY_ANALYSIS_ALLOWED'),pricing=False,
              detail='Browse API ufficiale. Analisi AI e prezzi richiedono verifica separata dei termini; risultati in sezione dedicata.'),
-        dict(id='vinted',name='Vinted',enabled=False,automatic=False,analysis=False,pricing=False,
-             detail='Ricerche esterne per topic. Raccolta automatica non attiva: serve un percorso autorizzato.',policy_url='https://www.vinted.it/terms-and-conditions'),
+        dict(id='vinted',name='Vinted',enabled=flag('BUYWATCHER_ENABLE_VINTED'),automatic=True,analysis=True,pricing=False,
+             detail='Connettore anonimo al catalogo. Una pagina per ricerca, una foto per annuncio, spedizione sconosciuta. Attivazione esplicita dopo verifica dell’accesso.',
+             policy_url='https://www.vinted.it/terms-and-conditions'),
         dict(id='facebook',name='Facebook Marketplace',enabled=False,automatic=False,analysis=False,pricing=False,
              detail='Ricerche esterne per topic. Nessuna raccolta automatica: accesso e località si gestiscono su Facebook.',
              policy_url='https://www.facebook.com/legal/automated_data_collection_terms'),
@@ -76,8 +93,14 @@ def marketplace_searches(topic):
     for identity,base,param in definitions:
         config=configs[identity]
         monitoring=config['enabled'] and config['automatic'] and identity in topic['sources']
+        if identity=='ebay':
+            status='automatic' if monitoring else 'setup'
+        elif identity=='vinted':
+            status='automatic' if monitoring else ('setup' if config['enabled'] else 'external')
+        else:
+            status='automatic' if monitoring else 'external'
         result.append({'id':identity,'name':config['name'],'monitoring':monitoring,
-            'status':'automatic' if monitoring else 'setup' if identity=='ebay' else 'external',
+            'status':status,
             'searches':[{'query':keyword,'url':base+'?'+urlencode({param:keyword})}
                         for keyword in topic['keywords']]})
     return result
@@ -134,18 +157,129 @@ class Ebay:
 EBAY = Ebay()
 
 
+VINTED_SITE = 'https://www.vinted.it'
+VINTED_API = 'https://api.vinted.it'
+VINTED_CATALOG = '/svc-catalogue/items'
+VINTED_COOKIE = 'access_token_web'
+VINTED_COOKIE_TTL = 6 * 3600  # Conservative floor; Vinted sets the real expiry.
+VINTED_USER_AGENT = ('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
+                     'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+
+
+class Vinted:
+    """Anonymous Vinted catalogue connector. One page per search, no detail fetch."""
+
+    def __init__(self):
+        self._cookie = None
+        self._anon_id = None
+        self._expiry = 0.0
+
+    def _refresh_session(self):
+        resp = cffi.get(VINTED_SITE + '/', headers={
+            'User-Agent': VINTED_USER_AGENT,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'it-IT,it;q=0.9,en;q=0.5',
+        }, impersonate='chrome', timeout=30)
+        if resp.status_code != 200:
+            raise SourceError('Vinted non ha rilasciato una sessione anonima.')
+        self._cookie = resp.cookies.get(VINTED_COOKIE)
+        self._anon_id = resp.headers.get('X-Anon-Id', '')
+        if not self._cookie:
+            raise SourceError('Vinted non ha rilasciato una sessione anonima.')
+        self._expiry = time.time() + VINTED_COOKIE_TTL
+
+    def _ensure_session(self):
+        if self._cookie is None or time.time() >= self._expiry:
+            self._refresh_session()
+
+    def _headers(self):
+        headers = {
+            'User-Agent': VINTED_USER_AGENT,
+            'Accept': 'application/json, text/plain, */*',
+            'Accept-Language': 'it-IT,it;q=0.9,en;q=0.5',
+            'Cache-Control': 'no-cache',
+            'Pragma': 'no-cache',
+            'Origin': VINTED_SITE,
+            'Referer': VINTED_SITE + '/',
+            'Locale': 'it-IT',
+            'Platform': 'web',
+            'X-Next-App': 'marketplace-web',
+            'Sec-Fetch-Dest': 'empty',
+            'Sec-Fetch-Mode': 'cors',
+            'Sec-Fetch-Site': 'same-site',
+        }
+        if self._cookie:
+            headers['Cookie'] = f'{VINTED_COOKIE}={self._cookie}'
+        if self._anon_id:
+            headers['X-Anon-Id'] = self._anon_id
+        return headers
+
+    def search(self, keyword, topic, _refreshed=False):
+        self._ensure_session()
+        params = {'search_text': keyword, 'page': 1, 'per_page': 30, 'order': 'newest_first'}
+        if topic.get('budget'):
+            params['price_to'] = topic['budget']
+        resp = cffi.get(VINTED_API + VINTED_CATALOG, params=params, headers=self._headers(),
+                        impersonate='chrome', timeout=30)
+        if resp.status_code == 401 and not _refreshed:
+            # The anonymous cookie expired mid-run: refresh once, never loop.
+            self._refresh_session()
+            return self.search(keyword, topic, _refreshed=True)
+        if resp.status_code in (403, 429):
+            raise SourceError('Vinted ha rifiutato la richiesta.')
+        if resp.status_code != 200:
+            raise SourceError(f'Vinted ha risposto con lo stato {resp.status_code}.')
+        items = resp.json().get('items')
+        if not isinstance(items, list):
+            raise SourceError('Struttura della risposta Vinted non riconosciuta.')
+        return items
+
+    def enrich(self, raw):
+        price = raw.get('price') or {}
+        fee = raw.get('service_fee') or {}
+        user = raw.get('user') or {}
+        photo = raw.get('photo') or {}
+        title = raw.get('title') or ''
+        brand = raw.get('brand_title') or ''
+        size = raw.get('size_title') or ''
+        return ListingInput(
+            listing_url=raw.get('url') or '',
+            title=title or (raw.get('url') or 'Annuncio Vinted'),
+            description=' '.join(part for part in (title, brand, size) if part),
+            price=_amount(price),
+            fees=_amount(fee),
+            currency=(price.get('currency_code') or 'EUR') if isinstance(price, dict) else 'EUR',
+            shipping_cost=None,
+            images=[photo['url']] if isinstance(photo, dict) and photo.get('url') else [],
+            condition=str(raw.get('status') or ''),
+            seller=str(user.get('login') or ''),
+            is_shop=bool(user.get('business')),
+            buying_format='fixed',
+            source='vinted',
+            external_id=str(raw.get('id') or ''),
+            availability='active',
+        ).model_dump()
+
+
+VINTED = Vinted()
+
+
 def search(source, keyword, topic):
     if source=='ebay':
         return EBAY.search(keyword,topic)
     if source=='subito':
         # Retain the old scope and pacing. Topic budget applies to TOTAL later.
         return scraper.search(keyword, comune=topic['location'], pages=1)
+    if source=='vinted':
+        return VINTED.search(keyword, topic)
     return []
 
 
 def enrich(source, raw):
     if source=='ebay':
         return EBAY.detail(raw)
+    if source=='vinted':
+        return VINTED.enrich(raw)
     return ListingInput(listing_url=raw['listing_url'],title=raw['title'],description=raw.get('description',''),
         price=raw.get('price'),town=raw.get('town',''),images=raw.get('images') or ([raw['thumbnail']] if raw.get('thumbnail') else []),
         seller=raw.get('shop_name',''),is_shop=raw.get('is_shop',False),source='subito',published_at=raw.get('date',''),

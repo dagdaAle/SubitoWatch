@@ -115,6 +115,27 @@ Fonti ufficiali, consultate il 21 ottobre 2026:
 - https://developer.ebay.com/join/api-license-agreement
 - https://ebaypartnernetwork.ebay.com/page/developer-questionnaire
 
+### Vinted
+
+`BUYWATCHER_ENABLE_VINTED=true` abilita il connettore anonimo al catalogo. Verifica
+prima che il tuo utilizzo sia consentito dai termini di Vinted: l’accesso automatizzato
+è vietato dalle condizioni e un uso a basso volume, personale, resta a tuo rischio.
+
+Il connettore usa una sessione anonima (cookie `access_token_web` e `X-Anon-Id`),
+una pagina per ricerca (fino a 30 risultati, ordinati per più recenti) e applica
+`price_to` dal budget del topic quando presente. Limiti per scelta:
+
+- una sola foto per annuncio (la copertina): l’analisi AI la segnalerà come evidenza limitata;
+- descrizione ricostruita da titolo, marca e taglia: quella completa sta solo nel dettaglio, che non viene richiamato;
+- spedizione sconosciuta (`None`): Vinted la calcola solo al checkout, meglio non stimarla.
+
+Il dettaglio dell’annuncio (endpoint JSON) risponde 403 alla protezione anti-bot e non
+viene richiamato. In caso di 403 o 429 la fonte passa in stato `failed` con il messaggio
+“Vinted ha rifiutato la richiesta”, senza nuovi tentativi. Endpoint e meccanismo dei
+cookie possono cambiare senza preavviso (è già avvenuto il passaggio da `/api/v2` a
+`/svc-catalogue`). Se il WAF segnala l’IP di casa, il blocco può riguardare anche la
+navigazione normale dal browser.
+
 ### Vinted e Facebook Marketplace: ricerche esterne
 
 Ogni topic mostra un pannello con collegamenti alle ricerche Vinted, eBay e
@@ -124,11 +145,13 @@ I collegamenti non applicano automaticamente taglie, località, distanza o budge
 questi filtri si controllano sulla piattaforma. Le taglie del profilo sono mostrate
 come promemoria nei topic collegati.
 
-Vinted e Facebook non hanno un connettore automatico attivo. Non vengono richieste
-password, cookie o sessioni degli account. Per Vinted serve verificare un percorso
-autorizzato; per Facebook serve un accesso esplicitamente autorizzato da Meta.
-Il pulsante di inserimento permette la valutazione dei dati forniti dall'utente:
-il solo URL non importa testo e foto, e la fonte resta identificata come manuale.
+Vinted ha un connettore anonimo al catalogo attivabile con
+`BUYWATCHER_ENABLE_VINTED` (vedi la sezione Vinted). Facebook non ha un connettore
+automatico attivo. Non vengono richieste password o sessioni di account esistenti:
+per Vinted si usa una sessione anonima, per Facebook serve un accesso esplicitamente
+autorizzato da Meta. Il pulsante di inserimento permette la valutazione dei dati
+forniti dall'utente: il solo URL non importa testo e foto, e la fonte resta
+identificata come manuale.
 
 Il collegamento eBay resta disponibile anche senza credenziali. La raccolta eBay
 è indicata come configurata solo se ci sono le credenziali e il topic include eBay;

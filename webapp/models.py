@@ -41,7 +41,7 @@ class TopicInput(BaseModel):
     budget: float | None = Field(default=None, gt=0)
     location: str = Field(default='', max_length=200)
     shipping_allowed: bool = True
-    sources: list[Literal['manual', 'subito', 'ebay']] = Field(default_factory=lambda: ['manual'])
+    sources: list[Literal['manual', 'subito', 'ebay', 'vinted']] = Field(default_factory=lambda: ['manual'])
     relevance_threshold: int = Field(default=70, ge=0, le=100)
     interval_hours: int = Field(default=24, ge=6, le=168)
     active: bool = True
@@ -84,7 +84,7 @@ class ListingInput(BaseModel):
     seller: str = Field(default='', max_length=300)
     is_shop: bool = False
     buying_format: Literal['fixed', 'auction', 'unknown'] = 'fixed'
-    source: Literal['manual', 'subito', 'ebay'] = 'manual'
+    source: Literal['manual', 'subito', 'ebay', 'vinted'] = 'manual'
     external_id: str = Field(default='', max_length=200)
     published_at: str = ''
     availability: Literal['active', 'unavailable', 'unknown'] = 'unknown'
