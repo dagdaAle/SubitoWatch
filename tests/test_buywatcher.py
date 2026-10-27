@@ -502,6 +502,20 @@ class VintedTest(DatabaseFixture):
         self.assertEqual(run['report']['sources']['vinted']['state'], 'failed')
         self.assertIn('Vinted ha rifiutato la richiesta.', run['report']['sources']['vinted']['errors'])
 
+    def test_vinted_enrich_tolerates_payload_variants(self):
+        raw = {'id': 42, 'title': 'Vans Old Skool', 'url': '/items/42-vans',
+               'price': {'amount': '25.0', 'currency_code': 'EUR'}, 'status': {'title': 'Ottime'},
+               'brand': {'title': 'Vans'}, 'size': {'title': '44'}, 'user': {'login': 'x'},
+               'photos': [{'full_size_url': 'https://images1.vinted.net/a.jpg'}]}
+        r = sources.VINTED.enrich(raw)
+        self.assertEqual(r['listing_url'], 'https://www.vinted.it/items/42-vans')
+        self.assertEqual(r['images'], ['https://images1.vinted.net/a.jpg'])
+        self.assertEqual(r['condition'], 'Ottime')
+        self.assertIn('44', r['description'])
+        r = sources.VINTED.enrich({'id': 7, 'title': 'Vans', 'price': '10'})
+        self.assertEqual(r['listing_url'], 'https://www.vinted.it/items/7')
+        self.assertEqual(r['price'], 10.0)
+
     def test_vinted_run_keeps_distinct_items_and_drops_duplicates(self):
         t = repo.save_topic(topic(sources=['vinted']))
         raws = [dict(VINTED_RAW, id=n, url=f'https://www.vinted.it/items/{n}-oggetto') for n in (1, 2, 3)]
