@@ -50,7 +50,7 @@ class DatabaseFixture(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory()
         self.env=patch.dict(os.environ,{'BUYWATCHER_DB':self.tmp.name+'/test.db','BUYWATCHER_AI_BASE_URL':'',
-            'BUYWATCHER_AI_MODEL':'','BUYWATCHER_VISION_MODEL':'','BUYWATCHER_ENABLE_SUBITO':'',
+            'BUYWATCHER_AI_MODEL':'','BUYWATCHER_VISION_MODEL':'','BUYWATCHER_ENABLE_SUBITO':'','BUYWATCHER_ENABLE_VINTED':'',
             'EBAY_CLIENT_ID':'','EBAY_CLIENT_SECRET':'','EBAY_ANALYSIS_ALLOWED':'','EBAY_PRICE_ANALYSIS_ALLOWED':''})
         self.env.start();repo.init_db()
         self.t=repo.save_topic(topic())
@@ -393,9 +393,21 @@ class MarketplaceTest(DatabaseFixture):
             self.assertFalse(sources.source_config('ebay')['analysis'])
             t['sources']=['manual']
             self.assertFalse(ebay()['monitoring'])
+            self.assertTrue(sources.source_config('vinted')['automatic'])
             for identity in ('vinted','facebook'):
-                self.assertFalse(sources.source_config(identity)['automatic'])
                 self.assertFalse(sources.source_config(identity)['enabled'])
+            self.assertFalse(sources.source_config('facebook')['automatic'])
+
+    def test_vinted_monitoring_requires_flag_and_topic_selection(self):
+        t=topic(sources=['vinted'])
+        def vinted():return next(s for s in sources.marketplace_searches(t) if s['id']=='vinted')
+        self.assertEqual(vinted()['status'],'external')
+        with patch.dict(os.environ,{'BUYWATCHER_ENABLE_VINTED':'true'}):
+            self.assertTrue(vinted()['monitoring'])
+            self.assertEqual(vinted()['status'],'automatic')
+            t['sources']=['manual']
+            self.assertFalse(vinted()['monitoring'])
+            self.assertEqual(vinted()['status'],'setup')
 
     def test_marketplace_endpoint_is_read_only_and_never_collects(self):
         with TestClient(app) as client,patch('sources.search') as search:
@@ -408,6 +420,112 @@ class MarketplaceTest(DatabaseFixture):
             self.assertEqual(repo.get_topic(self.t['id']),before)
             self.assertEqual(engine.key_for(repo.get_topic(self.t['id']),{'content_hash':'test','source':'manual'}),key)
             self.assertEqual(client.get('/api/topics/999999/marketplaces').status_code,404)
+
+
+VINTED_RAW = {
+    'id': 6854891835,
+    'title': 'Gioco da tavolo completo',
+    'price': {'amount': '3.0', 'currency_code': 'EUR'},
+    'brand_title': 'Marca Test',
+    'size_title': '',
+    'status': 'Very Good',
+    'url': 'https://www.vinted.it/items/6854891835-gioco',
+    'user': {'id': 123, 'login': 'venditore-test', 'business': False},
+    'photo': {'id': 'p1', 'url': 'https://images.vinted.net/photo.jpg'},
+    'service_fee': {'amount': '0.85', 'currency_code': 'EUR'},
+}
+
+
+class _FakeResp:
+    def __init__(self, status, json_data=None, headers=None, cookies=None):
+        self.status_code = status
+        self._json = json_data or {}
+        self.headers = headers or {}
+        self.cookies = cookies or {}
+
+    def json(self):
+        return self._json
+
+
+class VintedTest(DatabaseFixture):
+    def setUp(self):
+        super().setUp()
+        sources.VINTED._cookie = None
+        sources.VINTED._anon_id = None
+        sources.VINTED._expiry = 0.0
+
+    def test_enrich_maps_catalogue_item(self):
+        result = sources.enrich('vinted', VINTED_RAW)
+        self.assertEqual(result['source'], 'vinted')
+        self.assertEqual(result['listing_url'], VINTED_RAW['url'])
+        self.assertEqual(result['external_id'], str(VINTED_RAW['id']))
+        self.assertEqual(result['price'], 3.0)
+        self.assertEqual(result['fees'], 0.85)
+        self.assertIsNone(result['shipping_cost'])
+        self.assertEqual(result['currency'], 'EUR')
+        self.assertEqual(result['condition'], 'Very Good')
+        self.assertEqual(result['seller'], 'venditore-test')
+        self.assertFalse(result['is_shop'])
+        self.assertEqual(result['images'], [VINTED_RAW['photo']['url']])
+        self.assertEqual(result['description'], 'Gioco da tavolo completo Marca Test')
+        self.assertEqual(result['availability'], 'active')
+        self.assertEqual(result['buying_format'], 'fixed')
+
+    def test_enrich_missing_price_and_photo_are_unknown(self):
+        raw = {'id': 1, 'title': 'Senza prezzo', 'url': 'https://www.vinted.it/items/1-x',
+               'user': {'login': 'u'}, 'status': 'Good'}
+        result = sources.enrich('vinted', raw)
+        self.assertIsNone(result['price'])
+        self.assertIsNone(result['fees'])
+        self.assertEqual(result['images'], [])
+
+    def test_search_refreshes_cookie_once_on_401(self):
+        landing = _FakeResp(200, cookies={'access_token_web': 'tok'}, headers={'X-Anon-Id': 'anon'})
+        with patch('sources.cffi.get', side_effect=[landing, _FakeResp(401), landing, _FakeResp(200, json_data={'items': [VINTED_RAW]})]) as get:
+            items = sources.VINTED.search('gioco', {})
+        self.assertEqual(items, [VINTED_RAW])
+        self.assertEqual(get.call_count, 4)
+        self.assertEqual(get.call_args_list[3].kwargs['headers']['Cookie'], 'access_token_web=tok')
+
+    def test_vinted_403_fails_source_without_blocking_others(self):
+        t = repo.save_topic(topic(sources=['subito', 'vinted']))
+        def fake_search(source, keyword, topic_):
+            if source == 'vinted':
+                raise sources.SourceError('Vinted ha rifiutato la richiesta.')
+            return [{'listing_url': 'https://www.subito.it/x.htm', 'title': 'Oggetto', 'price': 50}]
+        with patch.dict(os.environ, {'BUYWATCHER_ENABLE_SUBITO': 'true', 'BUYWATCHER_ENABLE_VINTED': 'true'}), \
+             patch('sources.search', side_effect=fake_search), patch('engine.time.sleep'):
+            run_id = repo.start_run(t['id'])
+            engine.run(t['id'], run_id)
+        run = repo.get_run(run_id)
+        self.assertEqual(run['report']['sources']['subito']['state'], 'success')
+        self.assertEqual(run['report']['sources']['vinted']['state'], 'failed')
+        self.assertIn('Vinted ha rifiutato la richiesta.', run['report']['sources']['vinted']['errors'])
+
+    def test_vinted_run_keeps_distinct_items_and_drops_duplicates(self):
+        t = repo.save_topic(topic(sources=['vinted']))
+        raws = [dict(VINTED_RAW, id=n, url=f'https://www.vinted.it/items/{n}-oggetto') for n in (1, 2, 3)]
+        with patch.dict(os.environ, {'BUYWATCHER_ENABLE_VINTED': 'true'}), \
+             patch('sources.search', return_value=raws + [raws[0]]), patch('engine.time.sleep'):
+            run_id = repo.start_run(t['id'])
+            engine.run(t['id'], run_id)
+        self.assertEqual(repo.get_run(run_id)['report']['sources']['vinted']['found'], 3)
+
+    def test_topic_without_vinted_never_calls_connector(self):
+        t = repo.save_topic(topic(sources=['subito']))
+        with patch.dict(os.environ, {'BUYWATCHER_ENABLE_SUBITO': 'true'}), \
+             patch('sources.search', return_value=[]) as search, patch('engine.time.sleep'):
+            run_id = repo.start_run(t['id'])
+            engine.run(t['id'], run_id)
+        self.assertEqual([c.args[0] for c in search.call_args_list], ['subito'])
+
+    def test_disabled_source_reports_disabled(self):
+        t = repo.save_topic(topic(sources=['vinted']))
+        with patch('sources.VINTED.search') as vsearch:
+            run_id = repo.start_run(t['id'])
+            engine.run(t['id'], run_id)
+        vsearch.assert_not_called()
+        self.assertEqual(repo.get_run(run_id)['report']['sources']['vinted']['state'], 'disabled')
 
 
 class ApiTest(DatabaseFixture):

@@ -91,13 +91,18 @@ def run(topic_id,run_id,collect=True,max_evaluations=None):
                 for keyword in topic['keywords']:
                     try:
                         raw_items=sources.search(source,keyword,topic)
+                    except sources.SourceError as exc:
+                        source_report['errors'].append(str(exc))
+                        log.warning('Source search rejected: source=%s topic=%s',source,topic_id)
+                        time.sleep(1)
+                        continue
                     except Exception:
                         source_report['errors'].append('Ricerca non riuscita: '+keyword)
                         log.warning('Source search failed: source=%s topic=%s',source,topic_id)
                         time.sleep(1)
                         continue
                     for raw in raw_items:
-                        identity=raw.get('itemId') or raw.get('listing_url')
+                        identity=raw.get('itemId') or raw.get('listing_url') or raw.get('url')
                         if identity in seen:
                             continue
                         seen.add(identity)
@@ -112,8 +117,8 @@ def run(topic_id,run_id,collect=True,max_evaluations=None):
                             source_report['errors'].append('Dettagli di un annuncio non recuperabili.')
                         if source=='ebay':
                             time.sleep(0.2)
-                    # One second between keyword searches, no rate increase to legacy scraper.
-                    time.sleep(1)
+                    # Pacing: Vinted gets 2s between keywords; other sources keep 1s.
+                    time.sleep(2 if source=='vinted' else 1)
                 if source_report['errors']:
                     source_report['state']='partial' if source_report['found'] else 'failed'
                 report['sources'][source]=source_report
