@@ -20,6 +20,7 @@ import json
 import os
 import sqlite3
 import threading
+from contextlib import contextmanager
 from typing import Any, Literal
 
 Verdict = Literal["like", "dislike"]
@@ -28,11 +29,16 @@ _DB_PATH = os.environ.get("SUBITO_DB", "subito.db")
 _lock = threading.Lock()
 
 
-def _connect() -> sqlite3.Connection:
+@contextmanager
+def _connect():
     conn = sqlite3.connect(_DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
-    return conn
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 
 def init_db() -> None:
@@ -89,6 +95,24 @@ def init_db() -> None:
             )
             """
         )
+        # Curated "deals of the day": fully replaced by each daily curation run.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS deals (
+                listing_url   TEXT PRIMARY KEY,
+                title         TEXT,
+                price         INTEGER,
+                price_display TEXT,
+                town          TEXT,
+                thumbnail     TEXT,
+                is_shop       INTEGER NOT NULL DEFAULT 0,
+                channel_name  TEXT,
+                reason        TEXT,
+                score         INTEGER,
+                generated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+            """
+        )
         _migrate(conn)
 
 
@@ -105,6 +129,7 @@ _EXPECTED_COLUMNS: dict[str, dict[str, str]] = {
         "refreshed_at": "ALTER TABLE channels ADD COLUMN refreshed_at TEXT",
     },
     "channel_listings": {
+        "is_new": "ALTER TABLE channel_listings ADD COLUMN is_new INTEGER NOT NULL DEFAULT 0",
         "price_display": "ALTER TABLE channel_listings ADD COLUMN price_display TEXT",
         "town": "ALTER TABLE channel_listings ADD COLUMN town TEXT",
         "city": "ALTER TABLE channel_listings ADD COLUMN city TEXT",
@@ -198,7 +223,7 @@ def list_channels() -> list[dict[str, Any]]:
             new = conn.execute(
                 """
                 SELECT COUNT(*) AS c FROM channel_listings
-                WHERE channel_id = ? AND first_seen = last_seen
+                WHERE channel_id = ? AND is_new = 1
                 """,
                 (ch["id"],),
             ).fetchone()["c"]
@@ -213,6 +238,37 @@ def get_channel(channel_id: int) -> dict[str, Any] | None:
             "SELECT * FROM channels WHERE id = ?", (channel_id,)
         ).fetchone()
     return _row_to_channel(row) if row else None
+
+
+def update_channel(channel_id: int, fields: dict[str, Any]) -> dict[str, Any] | None:
+    """Update the given channel fields and return the channel, or None if missing.
+
+    Listings already in the channel are kept; the new filters apply from the
+    next refresh. min_price / max_price can be cleared with None.
+    """
+    current = get_channel(channel_id)
+    if current is None:
+        return None
+    merged = {**current, **{k: v for k, v in fields.items()
+                            if v is not None or k in ("min_price", "max_price")}}
+    name = (merged["name"] or "").strip()
+    kws = [k.strip() for k in merged["keywords"] if k and k.strip()]
+    if not name:
+        raise ValueError("channel name is required")
+    if not kws:
+        raise ValueError("at least one keyword is required")
+    with _lock, _connect() as conn:
+        conn.execute(
+            """
+            UPDATE channels
+               SET name = ?, keywords = ?, comune = ?, min_price = ?, max_price = ?
+             WHERE id = ?
+            """,
+            (name, json.dumps(kws, ensure_ascii=False), merged["comune"] or "",
+             merged["min_price"], merged["max_price"], channel_id),
+        )
+    return get_channel(channel_id)
+
 
 
 def delete_channel(channel_id: int) -> None:
@@ -239,6 +295,7 @@ def upsert_channel_listings(
     """
     new_count = 0
     with _lock, _connect() as conn:
+        conn.execute("UPDATE channel_listings SET is_new=0 WHERE channel_id=?", (channel_id,))
         for item in listings:
             url = item.get("listing_url")
             if not url:
@@ -257,9 +314,9 @@ def upsert_channel_listings(
                     INSERT INTO channel_listings
                         (channel_id, listing_url, title, price, price_display,
                          town, city, date, thumbnail, is_shop, shop_name,
-                         first_seen, last_seen)
+                         first_seen, last_seen, is_new)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                            datetime('now'), datetime('now'))
+                            datetime('now'), datetime('now'), 1)
                     """,
                     (
                         channel_id, url, item.get("title"), item.get("price"),
@@ -301,7 +358,7 @@ def get_channel_listings(channel_id: int) -> list[dict[str, Any]]:
             """
             SELECT listing_url, title, price, price_display, town, city, date,
                    thumbnail, is_shop, shop_name, first_seen, last_seen,
-                   (first_seen = last_seen) AS is_new
+                   (is_new = 1) AS is_new
             FROM channel_listings
             WHERE channel_id = ?
             ORDER BY is_new DESC, date DESC
@@ -422,3 +479,68 @@ def _loads_list(value: str | None) -> list[str]:
         return parsed if isinstance(parsed, list) else []
     except (ValueError, TypeError):
         return []
+
+
+# --------------------------------------------------------------------------- #
+# Deals of the day (curated daily by a scheduled Claude run)                   #
+# --------------------------------------------------------------------------- #
+
+
+def replace_deals(deals: list[dict[str, Any]]) -> int:
+    """Replace the whole 'deals of the day' set. Returns how many were stored."""
+    with _lock, _connect() as conn:
+        now = conn.execute("SELECT datetime('now')").fetchone()[0]
+        conn.execute("DELETE FROM deals")
+        for d in deals:
+            url = d.get("listing_url")
+            # Backfill the display fields (thumbnail, title, price, …) from the
+            # actually-stored listing so the curation only needs url + reason.
+            stored = conn.execute(
+                """
+                SELECT title, price, price_display, town, thumbnail, is_shop
+                FROM channel_listings WHERE listing_url = ?
+                ORDER BY last_seen DESC LIMIT 1
+                """,
+                (url,),
+            ).fetchone()
+            s = dict(stored) if stored else {}
+
+            def pick(key: str) -> Any:
+                val = d.get(key)
+                return val if val not in (None, "") else s.get(key)
+
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO deals
+                    (listing_url, title, price, price_display, town, thumbnail,
+                     is_shop, channel_name, reason, score, generated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    url,
+                    pick("title"),
+                    pick("price"),
+                    pick("price_display") or "",
+                    pick("town") or "",
+                    pick("thumbnail"),
+                    1 if (d.get("is_shop") if d.get("is_shop") is not None else s.get("is_shop")) else 0,
+                    d.get("channel_name", ""),
+                    d.get("reason", ""),
+                    d.get("score"),
+                    now,
+                ),
+            )
+    return len(deals)
+
+
+def get_deals() -> dict[str, Any]:
+    """Return the curated deals (highest score first) and when they were made."""
+    with _lock, _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM deals ORDER BY score DESC, price ASC"
+        ).fetchall()
+    deals = [dict(r) for r in rows]
+    for d in deals:
+        d["is_shop"] = bool(d["is_shop"])
+    generated_at = deals[0]["generated_at"] if deals else None
+    return {"deals": deals, "generated_at": generated_at}

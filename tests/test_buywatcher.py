@@ -1,0 +1,544 @@
+"""Regression tests: migrations, evidence, AI gate, failure modes and price scoring."""
+import copy
+import json
+import os
+from pathlib import Path
+import sys
+import tempfile
+import unittest
+from urllib.parse import urlsplit, parse_qs
+from unittest.mock import patch
+
+sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'webapp'))
+os.chdir(Path(__file__).resolve().parents[1]/'webapp')
+
+from fastapi.testclient import TestClient
+from pydantic import ValidationError
+import ai
+import personalization
+import engine
+import repository as repo
+import scoring
+import scraper
+import sources
+import images as image_loader
+import storage
+from app import app
+from models import Analysis,ListingInput,TopicInput
+
+
+def topic(**kw):
+    return TopicInput(name='Oggetto test',need='Un oggetto completo e funzionante',keywords=['oggetto test'],**kw).model_dump()
+
+
+def listing(n=1,**kw):
+    return ListingInput(listing_url=f'https://example.com/item/{n}',title='Oggetto modello test',price=100,
+                        description='Oggetto in buone condizioni, completo',shipping_cost=0,fees=0,**kw).model_dump()
+
+
+def analysis(**kw):
+    return Analysis.model_validate(dict(relevance=95,confidence=90,product_key='marca modello test',configuration='kit completo',
+        condition_grade='good',requirement_failures=[],requirement_unknowns=[],declared_condition=['Buone condizioni'],
+        observations=[],missing_parts=[],unknowns=[],risks=[],questions=[],reason='Corrisponde al modello e alla configurazione richiesti',**kw)).model_dump()
+
+
+def triage_pass():
+    return ai.TextTriage(decision='inspect',reason='Tipo di oggetto compatibile; verificare le foto.')
+
+
+class DatabaseFixture(unittest.TestCase):
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory()
+        self.env=patch.dict(os.environ,{'BUYWATCHER_DB':self.tmp.name+'/test.db','BUYWATCHER_AI_BASE_URL':'',
+            'BUYWATCHER_AI_MODEL':'','BUYWATCHER_VISION_MODEL':'','BUYWATCHER_ENABLE_SUBITO':'',
+            'EBAY_CLIENT_ID':'','EBAY_CLIENT_SECRET':'','EBAY_ANALYSIS_ALLOWED':'','EBAY_PRICE_ANALYSIS_ALLOWED':''})
+        self.env.start();repo.init_db()
+        self.t=repo.save_topic(topic())
+
+    def tearDown(self):
+        self.env.stop();self.tmp.cleanup()
+
+
+class DatabaseTest(DatabaseFixture):
+    def test_same_url_shared_but_topic_evaluations_independent(self):
+        second=repo.save_topic(topic())
+        i=repo.save_listing(self.t['id'],listing())
+        self.assertEqual(i,repo.save_listing(second['id'],listing()))
+        repo.save_evaluation(self.t['id'],i,'evaluated',analysis(),engine.key_for(self.t,repo.matches(self.t['id'])[0]))
+        self.assertEqual(repo.matches(second['id'])[0]['state'],'pending')
+        changed=listing();changed['price']=80;repo.save_listing(second['id'],changed)
+        self.assertEqual(repo.matches(self.t['id'])[0]['state'],'pending')
+        self.assertEqual(len(repo.history(i)),2)
+
+    def test_topic_edit_invalidates_evaluation(self):
+        i=repo.save_listing(self.t['id'],listing())
+        repo.save_evaluation(self.t['id'],i,'evaluated',analysis(),'anything')
+        repo.save_topic(topic(budget=90),self.t['id'])
+        self.assertIsNone(repo.matches(self.t['id'])[0]['analysis'])
+
+    def test_no_ai_no_evaluated_results(self):
+        repo.save_listing(self.t['id'],listing())
+        report=engine.evaluate_pending(self.t)
+        self.assertEqual(report['pending'],1)
+        self.assertEqual(repo.matches(self.t['id'])[0]['state'],'pending')
+
+    def test_cache_and_changed_content(self):
+        repo.save_listing(self.t['id'],listing())
+        with patch('ai.configured',return_value=True),patch('ai.evaluate',return_value=analysis()) as evaluate:
+            self.assertEqual(engine.evaluate_pending(self.t)['evaluated'],1)
+            self.assertEqual(engine.evaluate_pending(self.t)['cached'],1)
+            changed=listing();changed['description']='Descrizione modificata'
+            repo.save_listing(self.t['id'],changed)
+            engine.evaluate_pending(self.t)
+            self.assertEqual(evaluate.call_count,2)
+
+    def test_ai_limit_prioritizes_publication_not_reverse_insertion(self):
+        recent=repo.save_listing(self.t['id'],listing(1,published_at='2026-10-20 10:00:00'))
+        repo.save_listing(self.t['id'],listing(2,published_at='2026-08-01T10:00:00+00:00'))
+        with patch.dict(os.environ,{'BUYWATCHER_MAX_AI_PER_RUN':'1'}),patch('ai.configured',return_value=True),patch('ai.evaluate',return_value=analysis()) as evaluate:
+            report=engine.evaluate_pending(self.t)
+        self.assertEqual(evaluate.call_args.args[1]['id'],recent)
+        self.assertEqual(report['evaluated'],1)
+        self.assertEqual(report['pending'],1)
+
+    def test_invalid_publication_falls_back_to_discovery(self):
+        self.assertEqual(engine.publication_time({'published_at':'invalid','first_seen':'2026-10-20T10:00:00Z'}),
+                         engine.publication_time({'published_at':'2026-10-20T12:00:00+02:00'}))
+        self.assertEqual(engine.publication_time({}),0)
+
+    def test_requested_sample_cannot_exceed_server_budget(self):
+        for n in range(3):repo.save_listing(self.t['id'],listing(n))
+        with patch.dict(os.environ,{'BUYWATCHER_MAX_AI_PER_RUN':'2'}),patch('ai.configured',return_value=True),patch('ai.evaluate',return_value=analysis()) as evaluate:
+            self.assertEqual(engine.evaluate_pending(self.t,max_evaluations=1)['evaluated'],1)
+            self.assertEqual(engine.evaluate_pending(self.t,max_evaluations=200)['evaluated'],2)
+        self.assertEqual(evaluate.call_count,3)
+
+    def test_profile_persists_and_only_invalidates_connected_topics(self):
+        fashion=repo.save_topic(topic(profile_scope='fashion'))
+        for t in (self.t,fashion):
+            identity=repo.save_listing(t['id'],listing())
+            item=repo.matches(t['id'])[0]
+            repo.save_evaluation(t['id'],identity,'evaluated',analysis(),engine.key_for(t,item))
+        saved,affected=repo.save_profile({'shoe_size_eu':44,'clothing_sizes':['L','XL','L']})
+        self.assertEqual(saved['clothing_sizes'],['L','XL'])
+        self.assertEqual(repo.get_profile()['shoe_size_eu'],44)
+        self.assertEqual(affected,[fashion['id']])
+        self.assertEqual(repo.matches(self.t['id'])[0]['state'],'evaluated')
+        self.assertEqual(repo.matches(fashion['id'])[0]['state'],'pending')
+        same,affected=repo.save_profile({'shoe_size_eu':44,'clothing_sizes':['L','XL']})
+        self.assertEqual(same['revision'],saved['revision']);self.assertEqual(affected,[])
+
+    def test_clothing_changes_do_not_invalidate_footwear_cache(self):
+        footwear=repo.save_topic(topic(profile_scope='footwear'))
+        repo.save_profile({'shoe_size_eu':44,'clothing_sizes':['L']})
+        repo.save_listing(footwear['id'],listing())
+        item=repo.matches(footwear['id'])[0];key=engine.key_for(footwear,item)
+        saved,affected=repo.save_profile({'shoe_size_eu':44,'clothing_sizes':['XL']})
+        self.assertEqual(affected,[])
+        self.assertEqual(engine.key_for(footwear,item),key)
+
+    def test_profile_change_during_inference_cannot_publish_stale_sizes(self):
+        t=repo.save_topic(topic(profile_scope='footwear'))
+        repo.save_profile({'shoe_size_eu':44,'clothing_sizes':[]})
+        repo.save_listing(t['id'],listing())
+        def changed(*args):
+            repo.save_profile({'shoe_size_eu':45,'clothing_sizes':[]})
+            return analysis()
+        with patch('ai.configured',return_value=True),patch('ai.evaluate',side_effect=changed):
+            result=engine.evaluate_pending(t)
+        self.assertEqual(result['pending'],1)
+        self.assertEqual(repo.matches(t['id'])[0]['state'],'pending')
+
+    def test_old_inference_cannot_overwrite_new_content(self):
+        i=repo.save_listing(self.t['id'],listing())
+        key=engine.key_for(self.t,repo.matches(self.t['id'])[0])
+        changed=listing();changed['price']=90;repo.save_listing(self.t['id'],changed)
+        self.assertFalse(repo.save_evaluation(self.t['id'],i,'evaluated',analysis(),key))
+        self.assertEqual(repo.matches(self.t['id'])[0]['state'],'pending')
+
+    def test_run_lock_and_restart_recovery(self):
+        run_id=repo.start_run(self.t['id']);self.assertIsNotNone(run_id)
+        self.assertIsNone(repo.start_run(self.t['id']))
+        repo.init_db();self.assertEqual(repo.get_run(run_id)['state'],'interrupted')
+        self.assertIsNotNone(repo.start_run(self.t['id']))
+
+    def test_failed_source_never_success(self):
+        t=repo.save_topic(topic(sources=['subito']))
+        run_id=repo.start_run(t['id'])
+        with patch.dict(os.environ,{'BUYWATCHER_ENABLE_SUBITO':'true'}),patch('sources.search',side_effect=RuntimeError('outage')),patch('engine.time.sleep'):
+            engine.run(t['id'],run_id)
+        run=repo.get_run(run_id)
+        self.assertEqual(run['state'],'partial')
+        self.assertEqual(run['report']['sources']['subito']['state'],'failed')
+
+    def test_partial_search_keeps_successful_data(self):
+        t=repo.save_topic({**topic(sources=['subito']),'keywords':['good','bad']})
+        run_id=repo.start_run(t['id'])
+        raw={'listing_url':'https://www.subito.it/test.htm','title':'Oggetto','price':50}
+        with patch.dict(os.environ,{'BUYWATCHER_ENABLE_SUBITO':'true'}),patch('sources.search',side_effect=[[raw],RuntimeError('outage')]),patch('engine.time.sleep'):
+            engine.run(t['id'],run_id)
+        self.assertEqual(len(repo.matches(t['id'])),1)
+        self.assertEqual(repo.get_run(run_id)['report']['sources']['subito']['state'],'partial')
+
+    def test_additive_idempotent_legacy_migration_preserves_feedback(self):
+        ch=storage.create_channel('Vecchio topic',['keyword'])
+        ad={'listing_url':'https://www.subito.it/legacy.htm','title':'Vecchio annuncio','price':20,'thumbnail':None}
+        storage.upsert_channel_listings(ch['id'],[ad]);storage.set_feedback(ad['listing_url'],'like')
+        repo.migrate_legacy();repo.migrate_legacy()
+        imported=[t for t in repo.list_topics() if t['name']=='Vecchio topic']
+        self.assertEqual(len(imported),1);self.assertFalse(imported[0]['active'])
+        self.assertEqual(repo.matches(imported[0]['id'])[0]['verdict'],'like')
+        self.assertEqual(len(storage.get_favorites()),1)
+
+    def test_legacy_new_flag_resets_even_for_empty_refresh(self):
+        ch=storage.create_channel('Old',['key']);ad={'listing_url':'https://www.subito.it/old.htm','title':'Old'}
+        storage.upsert_channel_listings(ch['id'],[ad])
+        self.assertEqual(storage.list_channels()[0]['new_count'],1)
+        storage.upsert_channel_listings(ch['id'],[])
+        self.assertEqual(storage.list_channels()[0]['new_count'],0)
+
+    def test_source_provenance_cannot_be_replaced(self):
+        repo.save_listing(self.t['id'],listing())
+        with self.assertRaises(ValueError):
+            repo.save_listing(self.t['id'],listing(source='ebay'))
+
+
+class ScoreTest(unittest.TestCase):
+    def setUp(self):
+        self.topic=topic()
+        self.item={**listing(), 'id':1,'state':'evaluated','analysis':analysis(),'last_seen':repo.now()}
+        self.peers=[{**copy.deepcopy(self.item),'id':i,'listing_url':f'https://example.com/{i}','price':200} for i in (2,3,4)]
+
+    def test_real_cost_and_reference(self):
+        r=scoring.recommendation(self.topic,self.item,self.peers)
+        self.assertEqual(r['reference'],200)
+        self.assertEqual(r['savings_percent'],50)
+        self.assertEqual(r['label'],'Potenziale affare')
+
+    def test_missing_cost_no_score(self):
+        self.item['fees']=None
+        self.assertIsNone(scoring.recommendation(self.topic,self.item,self.peers)['score'])
+
+    def test_irrelevant_never_bargain(self):
+        self.item['analysis']['requirement_failures']=['Solo accessorio']
+        r=scoring.recommendation(self.topic,self.item,self.peers)
+        self.assertEqual(r['label'],'Non pertinente');self.assertIsNone(r['score'])
+
+    def test_auction_and_unknown_condition_no_score(self):
+        for change in ('auction','condition'):
+            item=copy.deepcopy(self.item)
+            if change=='auction':item['buying_format']='auction'
+            else:item['analysis']['condition_grade']='unknown'
+            self.assertIsNone(scoring.recommendation(self.topic,item,self.peers)['score'])
+
+    def test_variants_not_comparable(self):
+        self.peers[0]['analysis']['configuration']='solo corpo'
+        self.assertIsNone(scoring.recommendation(self.topic,self.item,self.peers)['score'])
+
+    def test_same_seller_or_photo_not_independent(self):
+        for item in self.peers:item['seller']='same seller'
+        self.assertEqual(len(scoring.recommendation(self.topic,self.item,self.peers)['comparables']),1)
+        for item in self.peers:item.update(seller='',images=['https://images.example.com/same.jpg'])
+        self.assertEqual(len(scoring.recommendation(self.topic,self.item,self.peers)['comparables']),1)
+
+    def test_ebay_not_used_for_other_source_price_reference(self):
+        self.peers[0]['source']='ebay'
+        self.assertIsNone(scoring.recommendation(self.topic,self.item,self.peers)['score'])
+
+    def test_stale_data_not_scored(self):
+        self.item['last_seen']='2000-01-01T00:00:00+00:00'
+        self.assertIsNone(scoring.recommendation(self.topic,self.item,self.peers)['score'])
+
+    def test_risk_caps_score(self):
+        self.item['analysis']['risks']=['Verificare identità del modello']
+        self.assertLess(scoring.recommendation(self.topic,self.item,self.peers)['score'],60)
+
+
+class ExtractionTest(unittest.TestCase):
+    def test_changed_html_is_error_not_empty_result(self):
+        with self.assertRaises(RuntimeError):scraper._extract_ads('<html>challenge</html>')
+        html='<script id="__NEXT_DATA__" type="application/json">'+json.dumps({'props':{'pageProps':{'initialState':{'items':{'originalList':[]}}}}})+'</script>'
+        self.assertEqual(scraper._extract_ads(html),[])
+
+    def test_failed_legacy_keywords_raise(self):
+        with patch('scraper.search',side_effect=RuntimeError('offline')):
+            with self.assertRaises(RuntimeError):scraper.search_keywords(['one','two'])
+
+    def test_photo_evidence_requires_attached_images(self):
+        a=analysis();a['observations']=[{'claim':'Danno','basis':'image','detail':'Foto 1','image_index':0}]
+        with patch.dict(os.environ,{'BUYWATCHER_AI_MODEL':'test','BUYWATCHER_VISION_MODEL':''}),patch('ai.triage',return_value=triage_pass()),patch('ai.complete',return_value=a):
+            with self.assertRaises(RuntimeError):ai.evaluate(topic(),listing())
+
+    def test_certain_text_exclusion_skips_photo_download_and_analysis(self):
+        result={'decision':'exclude','reason':'Si vende un PC completo, non la singola scheda.'}
+        with patch.dict(os.environ,{'BUYWATCHER_AI_MODEL':'text-test','BUYWATCHER_VISION_MODEL':'vision-test'}),patch('ai.complete',return_value=result) as complete,patch('images.prepare') as prepare:
+            body=ai.evaluate(topic(),listing(images=['https://example.com/photo.jpg']))
+        self.assertEqual(body['relevance'],0)
+        self.assertEqual(body['evaluation_stage'],'text_filter')
+        self.assertEqual(body['images_examined'],0)
+        self.assertEqual(complete.call_count,1)
+        prepare.assert_not_called()
+
+    def test_ambiguous_text_continues_to_photo_analysis(self):
+        result=triage_pass().model_dump()
+        with patch.dict(os.environ,{'BUYWATCHER_AI_MODEL':'text-test','BUYWATCHER_VISION_MODEL':'vision-test'}),patch('ai.complete',side_effect=[result,analysis()]) as complete,patch('images.prepare',return_value=([],[])) as prepare:
+            body=ai.evaluate(topic(),listing())
+        self.assertEqual(body['evaluation_stage'],'full_analysis')
+        self.assertEqual(complete.call_count,2)
+        prepare.assert_called_once()
+
+    def test_generation_schema_only_allows_existing_photo_indexes(self):
+        variants=ai.analysis_schema(2)['$defs']['Evidence']['anyOf']
+        text,photo=variants
+        self.assertEqual(photo['properties']['image_index']['enum'],[0,1])
+        self.assertIn('image_index',photo['required'])
+        self.assertEqual(text['properties']['image_index']['type'],'null')
+        self.assertNotIn('image',text['properties']['basis']['enum'])
+        self.assertEqual(len(ai.analysis_schema(0)['$defs']['Evidence']['anyOf']),1)
+
+    def test_provider_uses_constrained_schema_and_labels_each_photo(self):
+        schema=ai.analysis_schema(1)
+        with patch.dict(os.environ,{'BUYWATCHER_AI_BASE_URL':'https://example.com/v1','BUYWATCHER_AI_MODEL':'test','BUYWATCHER_VISION_MODEL':'vision-test'}),patch('ai.httpx.Client') as client:
+            response=client.return_value.__enter__.return_value.post.return_value
+            response.json.return_value={'choices':[{'message':{'content':'{}'}}]}
+            ai.complete('system',{'output_schema':schema},images=['data:image/jpeg;base64,test'])
+            request=client.return_value.__enter__.return_value.post.call_args.kwargs['json']
+        self.assertEqual(request['response_format']['json_schema']['schema'],schema)
+        self.assertEqual(request['response_format']['type'],'json_schema')
+        self.assertNotIn('output_schema',json.loads(request['messages'][1]['content'][0]['text']))
+        self.assertEqual(request['messages'][1]['content'][1],{'type':'text','text':'Foto allegata: image_index=0'})
+
+
+
+
+    def test_image_formats_normalized_for_vision(self):
+        import io,base64
+        from PIL import Image
+        for fmt in ("PNG","WEBP","AVIF"):
+            with self.subTest(format=fmt):
+                raw=io.BytesIO();Image.new("RGB",(30,20),(60,100,140)).save(raw,format=fmt)
+                value=image_loader.normalize_image(raw.getvalue())
+                self.assertTrue(value.startswith("data:image/jpeg;base64,"))
+                normalized=Image.open(io.BytesIO(base64.b64decode(value.split(",",1)[1])))
+                self.assertEqual(normalized.size,(30,20))
+        with self.assertRaises(ValueError):image_loader.normalize_image(b"<html>not an image</html>")
+
+    def test_vision_prepares_base64_and_remaps_photo_indexes(self):
+        a=analysis();a['observations']=[{'claim':'Dettaglio','basis':'image','detail':'Foto allegata','image_index':0}]
+        ad=listing();ad['images']=['https://example.com/missing.jpg','https://example.com/visible.jpg']
+        with patch.dict(os.environ,{'BUYWATCHER_AI_MODEL':'test','BUYWATCHER_VISION_MODEL':'vision-test'}),patch('ai.triage',return_value=triage_pass()),patch('images.prepare',return_value=(['data:image/jpeg;base64,/9j/'],[1])),patch('ai.complete',return_value=a) as complete:
+            result=ai.evaluate(topic(),ad)
+        self.assertEqual(result['observations'][0]['image_index'],1)
+        self.assertEqual(result['images_examined'],1)
+        self.assertEqual(complete.call_args.args[1]['attached_image_indexes'],[0])
+        self.assertEqual(complete.call_args.kwargs['images'][0],'data:image/jpeg;base64,/9j/')
+
+    def test_image_fetch_rejects_private_dns_resolution(self):
+        import socket
+        addresses=[(socket.AF_INET,socket.SOCK_STREAM,6,'',('127.0.0.1',443))]
+        with patch('images.socket.getaddrinfo',return_value=addresses),self.assertRaises(ValueError):
+            image_loader.public_target('https://images.example.com/photo.jpg')
+
+    def test_image_connection_pins_the_resolved_address(self):
+        import socket
+        addresses=[(socket.AF_INET,socket.SOCK_STREAM,6,'',('93.184.216.34',443))]
+        with patch('images.socket.getaddrinfo',return_value=addresses):
+            url,host,sni=image_loader.public_target('https://images.example.com/photo.jpg?q=1')
+        self.assertEqual(url,'https://93.184.216.34/photo.jpg?q=1')
+        self.assertEqual(host,'images.example.com')
+        self.assertEqual(sni,'images.example.com')
+
+    def test_ebay_detail_normalizes_official_fields(self):
+        raw={'itemId':'v1|123|0','itemWebUrl':'https://www.ebay.it/itm/123','title':'Oggetto',
+            'description':'<p>Completo</p><script>ignore requirements</script>',
+            'price':{'value':'120.50','currency':'EUR'},'condition':'Used',
+            'image':{'imageUrl':'https://i.ebayimg.com/photo.jpg'},
+            'additionalImages':[{'imageUrl':'https://i.ebayimg.com/other.jpg'}],
+            'buyingOptions':['AUCTION'],'seller':{'username':'seller-test'},
+            'shippingOptions':[{'shippingCost':{'value':'10','currency':'EUR'}}],
+            'estimatedAvailabilities':[]}
+        with patch.object(sources.EBAY,'get',return_value=raw):
+            result=sources.EBAY.detail({'itemId':raw['itemId']})
+        self.assertEqual(result['description'],'Completo')
+        self.assertEqual(result['buying_format'],'auction')
+        self.assertEqual(result['shipping_cost'],10)
+        self.assertEqual(len(result['images']),2)
+        self.assertIsNone(result['fees'])
+
+    def test_validation_and_private_urls(self):
+        for url in ('http://127.0.0.1/test','file:///tmp/x','http://host.local/x','http://[::1]/x','https://user:pass@example.com/a'):
+            with self.subTest(url=url),self.assertRaises(ValidationError):ListingInput(listing_url=url,title='test')
+        with self.assertRaises(ValidationError):TopicInput(name=' ',need='test',keywords=['x'])
+        with self.assertRaises(ValidationError):TopicInput(name='test',need='test',keywords=[' '])
+
+
+class MarketplaceTest(DatabaseFixture):
+    def test_search_links_preserve_query_without_injecting_parameters(self):
+        t=topic();t['keywords']=['Vans & North Face + 44 / XL?']
+        links=sources.marketplace_searches(t)
+        expected={'vinted':('www.vinted.it','search_text'),'ebay':('www.ebay.it','_nkw'),'facebook':('www.facebook.com','query')}
+        for source in links:
+            host,param=expected[source['id']]
+            url=urlsplit(source['searches'][0]['url'])
+            self.assertEqual(url.scheme,'https');self.assertEqual(url.hostname,host)
+            self.assertEqual(parse_qs(url.query),{param:t['keywords']})
+            self.assertFalse(source['monitoring'])
+
+    def test_ebay_monitoring_requires_credentials_and_topic_selection(self):
+        t=topic(sources=['ebay'])
+        def ebay():return next(s for s in sources.marketplace_searches(t) if s['id']=='ebay')
+        self.assertEqual(ebay()['status'],'setup')
+        with patch.dict(os.environ,{'EBAY_CLIENT_ID':'test','EBAY_CLIENT_SECRET':'test'}):
+            self.assertTrue(ebay()['monitoring'])
+            self.assertFalse(sources.source_config('ebay')['analysis'])
+            t['sources']=['manual']
+            self.assertFalse(ebay()['monitoring'])
+            for identity in ('vinted','facebook'):
+                self.assertFalse(sources.source_config(identity)['automatic'])
+                self.assertFalse(sources.source_config(identity)['enabled'])
+
+    def test_marketplace_endpoint_is_read_only_and_never_collects(self):
+        with TestClient(app) as client,patch('sources.search') as search:
+            before=repo.get_topic(self.t['id'])
+            key=engine.key_for(before,{'content_hash':'test','source':'manual'})
+            response=client.get(f"/api/topics/{self.t['id']}/marketplaces")
+            self.assertEqual(response.status_code,200)
+            self.assertEqual(len(response.json()['marketplaces']),3)
+            search.assert_not_called()
+            self.assertEqual(repo.get_topic(self.t['id']),before)
+            self.assertEqual(engine.key_for(repo.get_topic(self.t['id']),{'content_hash':'test','source':'manual'}),key)
+            self.assertEqual(client.get('/api/topics/999999/marketplaces').status_code,404)
+
+
+class ApiTest(DatabaseFixture):
+    def test_topic_summary_counts_use_the_same_cache_key_as_results(self):
+        with TestClient(app) as client:
+            identity=repo.save_listing(self.t['id'],listing())
+            item=repo.matches(self.t['id'])[0]
+            repo.save_evaluation(self.t['id'],identity,'evaluated',analysis(),engine.key_for(self.t,item))
+            result=client.get('/api/topics').json()['topics'][0]
+            self.assertEqual(result['counts'].get('evaluated'),1)
+            self.assertEqual(engine.key_for(self.t,item),engine.key_for(result,item))
+            repo.save_evaluation(self.t['id'],identity,'evaluated',analysis(),item['content_hash']+':old-model')
+            self.assertEqual(client.get('/api/topics').json()['topics'][0]['counts'],{'pending':1})
+
+    def test_profile_api_validation_and_roundtrip(self):
+        with TestClient(app) as client:
+            self.assertEqual(client.get('/api/profile').json()['profile']['clothing_sizes'],[])
+            self.assertEqual(client.put('/api/profile',json={'shoe_size_eu':44.25,'clothing_sizes':['L']}).status_code,422)
+            self.assertEqual(client.put('/api/profile',json={'shoe_size_eu':44,'clothing_sizes':['invalid']}).status_code,422)
+            response=client.put('/api/profile',json={'shoe_size_eu':44,'clothing_sizes':['L','XL']})
+            self.assertEqual(response.status_code,200)
+            self.assertEqual(client.get('/api/profile').json()['profile']['clothing_sizes'],['L','XL'])
+
+    def test_run_sample_budget_validation_and_forwarding(self):
+        with TestClient(app) as client:
+            path=f"/api/topics/{self.t['id']}"
+            self.assertEqual(client.post(path+'/evaluate',json={'max_evaluations':0}).status_code,422)
+            self.assertEqual(client.post(path+'/refresh',json={'max_evaluations':201}).status_code,422)
+            with patch.object(app.state.worker,'submit',return_value=999) as submit:
+                self.assertEqual(client.post(path+'/refresh',json={'max_evaluations':6}).status_code,202)
+                submit.assert_called_with(self.t['id'],max_evaluations=6)
+                self.assertEqual(client.post(path+'/evaluate').status_code,202)
+                submit.assert_called_with(self.t['id'],False,max_evaluations=None)
+
+    def test_unknown_condition_and_missing_parts_require_review(self):
+        with TestClient(app) as client:
+            identity=repo.save_listing(self.t['id'],listing())
+            for changes in ({'condition_grade':'unknown'},{'missing_parts':['Alimentatore mancante']}):
+                with self.subTest(changes=changes):
+                    a=analysis();a.update(changes)
+                    item=repo.matches(self.t['id'])[0]
+                    repo.save_evaluation(self.t['id'],identity,'evaluated',a,engine.key_for(self.t,item))
+                    result=client.get(f"/api/topics/{self.t['id']}/listings").json()['listings'][0]
+                    self.assertEqual(result['view'],'review')
+
+    def test_api_complete_flow_and_error_states(self):
+        with TestClient(app) as client:
+            self.assertEqual(client.get('/health').json()['app'],'BuyWatcher')
+            response=client.post('/api/topics',json=topic());self.assertEqual(response.status_code,201)
+            t=response.json()['topic'];tid=t['id']
+            self.assertEqual(client.post('/api/topics',json={**topic(),'budget':-1}).status_code,422)
+            with patch('ai.configured',return_value=True),patch('ai.evaluate',return_value=analysis()):
+                r=client.post(f'/api/topics/{tid}/listings',json=listing())
+                self.assertEqual(r.status_code,201)
+                app.state.worker.pool.submit(lambda:None).result(timeout=5)
+                body=client.get(f'/api/topics/{tid}/listings').json()
+                self.assertEqual(body['listings'][0]['view'],'relevant')
+                iid=r.json()['listing_id']
+                self.assertEqual(client.post(f'/api/topics/{tid}/listings/{iid}/feedback',json={'verdict':'like'}).status_code,200)
+                self.assertEqual(client.get(f'/api/topics/{tid}/listings').json()['listings'][0]['verdict'],'like')
+            self.assertEqual(client.post(f'/api/topics/{tid}/listings',json=listing(source='ebay')).status_code,422)
+            self.assertEqual(client.get('/api/topics/9999/listings').status_code,404)
+            self.assertEqual(client.get('/api/runs/9999').status_code,404)
+            self.assertEqual(client.post('/api/topic-plan',json={'need':'test'}).status_code,503)
+            self.assertEqual(client.get('/').status_code,200)
+            self.assertIn('BuyWatcher',client.get('/').text)
+            self.assertEqual(client.delete(f'/api/topics/{tid}').status_code,200)
+
+    def test_stale_model_does_not_publish_old_analysis(self):
+        with TestClient(app) as client:
+            repo.save_listing(self.t['id'],listing())
+            item=repo.matches(self.t['id'])[0]
+            repo.save_evaluation(self.t['id'],item['id'],'evaluated',analysis(),'old-config')
+            result=client.get(f"/api/topics/{self.t['id']}/listings").json()['listings'][0]
+            self.assertEqual(result['state'],'pending');self.assertIsNone(result['analysis'])
+
+
+class SizePolicyTest(unittest.TestCase):
+    def test_photo_type_cannot_override_an_incompatible_declared_size(self):
+        topic={'profile_scope':'fashion','buyer_profile':{'shoe_size_eu':44,'clothing_sizes':['L','XL']}}
+        ad={'title':'Vans donna n. 41','description':'Vendo per inutilizzo, numero 41'}
+        original=analysis();original.update(images_examined=1,observations=[{'basis':'image','claim':'Scarpe Vans','detail':'Le immagini mostrano un paio di scarpe nere con lacci','image_index':0}])
+        original['size_check']=personalization.assess(topic,ad)
+        original['requirement_unknowns']=[original['size_check']['reason']]
+        refined=personalization.refine(topic,ad,original)
+        self.assertEqual(refined['relevance'],0)
+        self.assertEqual(refined['size_check']['status'],'exclude')
+        self.assertTrue(refined['requirement_failures'])
+        self.assertEqual(original['relevance'],95)
+
+    def test_photo_label_is_not_used_to_invent_a_missing_declared_size(self):
+        topic={'profile_scope':'fashion','buyer_profile':{'shoe_size_eu':44}}
+        original=analysis();original.update(images_examined=1,observations=[{'basis':'image','claim':'Scarpe Vans','detail':'Scarpe con etichetta che sembra riportare 41','image_index':0}])
+        result=personalization.refine(topic,{'title':'Vans nere','description':'Usate'},original)
+        self.assertEqual(result['relevance'],95)
+
+    def test_clearing_one_preference_disables_only_its_category(self):
+        topic={'profile_scope':'fashion','buyer_profile':{'clothing_sizes':['L','XL']}}
+        self.assertEqual(personalization.assess(topic,{'title':'Scarpe taglia 42'})['status'],'none')
+        topic['buyer_profile']={'shoe_size_eu':44}
+        self.assertEqual(personalization.assess(topic,{'title':'Felpa taglia S'})['status'],'none')
+        self.assertEqual(personalization.assess(topic,{'title':'Scarpe taglia 42'})['status'],'exclude')
+
+    def assess(self,title,scope='fashion',description=''):
+        return personalization.assess({'profile_scope':scope,'buyer_profile':{'shoe_size_eu':44,'clothing_sizes':['L','XL']}}, {'title':title,'description':description})['status']
+
+    def test_declared_sizes_are_filtered_without_converting_or_guessing(self):
+        examples=[('Scarpe Vans taglia 44','pass'),('Vans Old Skool tg.46','exclude'),
+            ('Scarpe taglia 44,5','exclude'),('Scarpe num. 29 / 30','exclude'),
+            ('Scarpe US 10','unknown'),('Scarpe EU 44 UK 9.5','pass'),
+            ('Felpa taglia L','pass'),('Felpa taglia XL','pass'),('Felpa taglia XXL','exclude'),
+            ('Felpa taglia M','exclude'),('T-shirt uomo L','pass'),
+            ('Felpa Vans Small','exclude'),('Felpa Extra Large','pass'),
+            ('Scarpe Vans n. 43','exclude'),
+            ('Felpa taglia 44','unknown'),('Felpa senza indicazione','unknown')]
+        for title,expected in examples:
+            with self.subTest(title=title):self.assertEqual(self.assess(title),expected)
+        self.assertEqual(self.assess('Server con RAM 44 GB',scope='none'),'none')
+
+    def test_size_exclusion_skips_all_inference(self):
+        t=topic(profile_scope='footwear');t['buyer_profile']={'shoe_size_eu':44}
+        ad=listing();ad['title']='Scarpe taglia 42'
+        with patch.dict(os.environ,{'BUYWATCHER_AI_MODEL':'test'}),patch('ai.complete') as complete,patch('images.prepare') as prepare:
+            body=ai.evaluate(t,ad)
+        self.assertEqual(body['evaluation_stage'],'size_filter')
+        self.assertTrue(body['requirement_failures'])
+        complete.assert_not_called();prepare.assert_not_called()
+
+    def test_unknown_size_remains_a_requirement_to_verify(self):
+        body=personalization.annotate(analysis(),{'status':'unknown','reason':'Taglia non nota'})
+        self.assertIn('Taglia non nota',body['requirement_unknowns'])
+
+
+if __name__=='__main__':unittest.main()

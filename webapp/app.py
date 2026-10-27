@@ -1,195 +1,232 @@
-"""
-SubitoWatch: a small local web app to monitor Subito.it listings in the
-province of Verona, organized into user-defined "channels".
-
-A channel is a themed feed (e.g. "Moto", "Tecnologia") made of one or more
-search keywords plus optional comune/price filters. Refreshing a channel runs
-all its keywords on Subito, dedupes, and stores the results, flagging which
-listings are new since the last refresh.
-
-Endpoints:
-* ``GET  /``                        -> serves the single-page UI.
-* ``GET  /channels``                -> list channels (with total/new counts).
-* ``POST /channels``                -> create a channel.
-* ``DELETE /channels/{id}``         -> delete a channel (and its listings).
-* ``POST /channels/{id}/refresh``   -> re-run the channel's searches on Subito.
-* ``GET  /channels/{id}/listings``  -> listings for a channel (+ feedback map).
-* ``POST /feedback``                -> store/clear a like/dislike for a listing.
-* ``GET  /favorites``               -> all liked listings (global).
-
-A background thread refreshes every channel once a day so the feeds stay fresh
-even without manual interaction. Meant for local, personal use (run via Docker);
-it does no auth. Persistence is a single SQLite file (see ``storage.py``).
-"""
-
+"""BuyWatcher API. A single application worker owns the scheduler and job queue."""
 from __future__ import annotations
 
-import threading
-import time
-from typing import Any, Literal
+from pathlib import Path
+
+import os
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from typing import Literal
+from collections import Counter
 
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
-import scraper
-import storage
-
-app = FastAPI(title="SubitoWatch", version="2.0.0")
-
-# How often the background scheduler refreshes all channels (seconds).
-_REFRESH_INTERVAL_SECONDS = 24 * 60 * 60  # once a day
-
-
-class ChannelCreate(BaseModel):
-    name: str = Field(..., min_length=1)
-    keywords: list[str] = Field(..., min_length=1)
-    comune: str = ""
-    min_price: int | None = Field(None, ge=0)
-    max_price: int | None = Field(None, ge=0)
+import ai
+import engine
+import legacy
+import repository as repo
+import scoring
+import sources
+import personalization
+from models import ListingInput, TopicInput, BuyerProfile
 
 
-class FeedbackRequest(BaseModel):
-    listing_url: str = Field(..., min_length=1)
-    verdict: Literal["like", "dislike"] | None = None
-    title: str = ""
-    price: int | None = None
-    price_display: str = ""
-    town: str = ""
-    thumbnail: str | None = None
-    is_shop: bool = False
-    shop_name: str = ""
+@asynccontextmanager
+async def lifespan(app):
+    repo.init_db()
+    app.state.worker=engine.Worker()
+    app.state.worker.start()
+    yield
+    app.state.worker.close()
 
 
-def _refresh_channel(channel: dict[str, Any]) -> int:
-    """Run a channel's searches on Subito and store results. Returns new count."""
-    listings = scraper.search_keywords(
-        channel["keywords"],
-        comune=channel["comune"],
-        min_price=channel["min_price"],
-        max_price=channel["max_price"],
-    )
-    return storage.upsert_channel_listings(channel["id"], listings)
+app=FastAPI(title='BuyWatcher',version='3.0.0',lifespan=lifespan)
 
 
-def _scheduler_loop() -> None:
-    """Background thread: refresh every channel once per interval."""
-    # Small initial delay so startup isn't blocked by network I/O.
-    time.sleep(30)
-    while True:
-        try:
-            for channel in storage.list_channels():
-                try:
-                    _refresh_channel(channel)
-                except Exception:
-                    # One channel failing shouldn't stop the others.
-                    continue
-        except Exception:
-            pass
-        time.sleep(_REFRESH_INTERVAL_SECONDS)
+def require_topic(topic_id):
+    topic=repo.get_topic(topic_id)
+    if not topic:
+        raise HTTPException(404,'Topic non trovato')
+    return topic
 
 
-@app.on_event("startup")
-def _startup() -> None:
-    storage.init_db()
-    thread = threading.Thread(target=_scheduler_loop, daemon=True)
-    thread.start()
+def require_idle(topic_id):
+    require_topic(topic_id)
+    previous=repo.runs(topic_id)
+    if previous and previous[0]['state']=='running':
+        raise HTTPException(409,'Attendi il completamento della ricerca in corso.')
 
 
-# --------------------------------------------------------------------------- #
-# Channels                                                                     #
-# --------------------------------------------------------------------------- #
+@app.get('/health')
+def health():
+    with repo.connect() as db:
+        db.execute('SELECT 1 FROM bw_topics').fetchone()
+    return {'ok':True,'app':'BuyWatcher','ai_configured':ai.configured()}
 
 
-@app.get("/channels")
-def get_channels() -> dict[str, Any]:
-    return {"channels": storage.list_channels()}
+@app.get('/api/config')
+def config():
+    return {'app':'BuyWatcher','ai_configured':ai.configured(),
+            'vision_configured':bool(ai.configured() and os.getenv('BUYWATCHER_VISION_MODEL')),
+            'sources':sources.catalog()}
 
 
-@app.post("/channels")
-def add_channel(req: ChannelCreate) -> dict[str, Any]:
+@app.get('/api/topics')
+def topics():
+    topics=repo.list_topics()
+    for topic in topics:
+        topic['counts']=dict(Counter(item['state'] for item in current_items(topic)))
+    return {'topics':topics}
+
+
+def current_items(topic):
+    items=repo.matches(topic['id'])
+    personalized=engine.effective_topic(topic)
+    for item in items:
+        if item['state']=='evaluated' and item['evaluation_key']!=engine.key_for(topic,item):
+            item.update(state='pending',analysis=None,error='Le preferenze, il topic o il modello sono cambiati: rivaluta l’annuncio.')
+        if item['state']=='evaluated' and item.get('analysis'):
+            item['analysis']=personalization.refine(personalized,item,item['analysis'])
+    return items
+
+
+@app.get('/api/topics/{topic_id}/marketplaces')
+def marketplaces(topic_id:int):
+    return {'marketplaces':sources.marketplace_searches(require_topic(topic_id))}
+
+
+@app.get('/api/profile')
+def profile():
+    return {'profile':repo.get_profile()}
+
+
+@app.put('/api/profile')
+def update_profile(body:BuyerProfile):
+    profile,affected=repo.save_profile(body.model_dump())
+    return {'profile':profile,'affected_topic_ids':affected}
+
+
+@app.post('/api/topics',status_code=201)
+def create_topic(body:TopicInput):
+    return {'topic':repo.save_topic(body.model_dump())}
+
+
+@app.put('/api/topics/{topic_id}')
+def update_topic(topic_id:int,body:TopicInput):
+    require_idle(topic_id)
+    return {'topic':repo.save_topic(body.model_dump(),topic_id)}
+
+
+@app.delete('/api/topics/{topic_id}')
+def delete_topic(topic_id:int):
+    require_idle(topic_id)
+    repo.delete_topic(topic_id)
+    return {'ok':True}
+
+
+class PlanInput(BaseModel):
+    need:str=Field(min_length=3,max_length=4000)
+
+
+@app.post('/api/topic-plan')
+def plan_topic(body:PlanInput):
     try:
-        channel = storage.create_channel(
-            req.name,
-            req.keywords,
-            comune=req.comune,
-            min_price=req.min_price,
-            max_price=req.max_price,
-        )
+        proposal=ai.plan(body.need)
+        allowed=set(TopicInput.model_fields)-{'sources','active','interval_hours','relevance_threshold'}
+        proposal={k:v for k,v in proposal.items() if k in allowed}
+        return {'topic':TopicInput.model_validate({**proposal,'need':body.need}).model_dump()}
+    except (RuntimeError,ValidationError,TypeError,AttributeError):
+        raise HTTPException(503,'Proposta non disponibile. Configura il modello o compila il topic manualmente.')
+
+
+class RunOptions(BaseModel):
+    max_evaluations:int|None=Field(default=None,ge=1,le=200)
+
+
+@app.post('/api/topics/{topic_id}/refresh',status_code=202)
+def refresh(topic_id:int,body:RunOptions|None=None):
+    require_topic(topic_id)
+    run_id=app.state.worker.submit(topic_id,max_evaluations=body.max_evaluations if body else None)
+    if run_id is None:
+        raise HTTPException(409,'Una ricerca per questo topic è già in corso.')
+    return {'run_id':run_id}
+
+
+@app.post('/api/topics/{topic_id}/evaluate',status_code=202)
+def evaluate(topic_id:int,body:RunOptions|None=None):
+    require_topic(topic_id)
+    run_id=app.state.worker.submit(topic_id,False,max_evaluations=body.max_evaluations if body else None)
+    if run_id is None:
+        raise HTTPException(409,'Una valutazione per questo topic è già in corso.')
+    return {'run_id':run_id}
+
+
+@app.get('/api/topics/{topic_id}/runs')
+def runs(topic_id:int):
+    require_topic(topic_id)
+    return {'runs':repo.runs(topic_id)}
+
+
+@app.get('/api/runs/{run_id}')
+def get_run(run_id:int):
+    result=repo.get_run(run_id)
+    if result is None:
+        raise HTTPException(404,'Processo non trovato')
+    return result
+
+
+@app.post('/api/topics/{topic_id}/listings',status_code=201)
+def import_listing(topic_id:int,body:ListingInput):
+    require_idle(topic_id)
+    # A caller cannot spoof official sources or bypass per-source access/AI policy.
+    if body.source!='manual':
+        raise HTTPException(422,'Gli annunci inseriti da te devono usare la fonte manual.')
+    try:
+        listing_id=repo.save_listing(topic_id,body.model_dump())
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(409,str(exc)) from exc
+    run_id=app.state.worker.submit(topic_id,False)
+    return {'listing_id':listing_id,'run_id':run_id}
 
-    # Populate it immediately so the user sees results right away.
+
+@app.get('/api/topics/{topic_id}/listings')
+def listings(topic_id:int):
+    topic=require_topic(topic_id)
+    items=current_items(topic)
+    # Never publish stale eBay display data beyond the documented six-hour window.
+    items=[i for i in items if i['source']!='ebay' or (datetime.now(timezone.utc)-datetime.fromisoformat(i['last_seen'])).total_seconds()<6*3600]
+    for item in items:
+        item['recommendation']=scoring.recommendation(topic,item,items)
+        analysis=item.get('analysis') or {}
+        if item['state']!='evaluated':
+            item['view']='review'
+        elif analysis.get('requirement_failures') or analysis.get('relevance',0)<topic['relevance_threshold']:
+            item['view']='excluded'
+        elif analysis.get('requirement_unknowns') or analysis.get('missing_parts') or analysis.get('condition_grade','unknown')=='unknown' or analysis.get('risks') or analysis.get('confidence',0)<70 or item['availability']=='unavailable' or scoring.stale(item):
+            item['view']='review'
+        else:
+            item['view']='relevant'
+    # Topic matches retain independent evaluations; exact URLs are globally deduplicated.
+    items.sort(key=lambda i:(i['recommendation']['score'] if i['recommendation']['score'] is not None else -1,
+                            (i.get('analysis') or {}).get('relevance',-1)),reverse=True)
+    return {'topic':topic,'listings':items}
+
+
+@app.get('/api/listings/{listing_id}/history')
+def history(listing_id:int):
+    return {'history':repo.history(listing_id)}
+
+
+class FeedbackInput(BaseModel):
+    verdict:Literal['like','dislike']|None=None
+
+
+@app.post('/api/topics/{topic_id}/listings/{listing_id}/feedback')
+def feedback(topic_id:int,listing_id:int,body:FeedbackInput):
+    require_topic(topic_id)
     try:
-        new_count = _refresh_channel(channel)
-    except RuntimeError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-    channel["new_count"] = new_count
-    channel["total_count"] = new_count
-    return {"channel": channel}
+        repo.set_feedback(topic_id,listing_id,body.verdict)
+    except ValueError:
+        raise HTTPException(404,'Annuncio non trovato nel topic')
+    return {'ok':True}
 
 
-@app.delete("/channels/{channel_id}")
-def remove_channel(channel_id: int) -> dict[str, Any]:
-    storage.delete_channel(channel_id)
-    return {"ok": True, "id": channel_id}
+# Keep old MCP routes and storage contracts. No legacy scheduler is started.
+# These routes remain isolated from the evaluated BuyWatcher feed.
+for route in legacy.app.routes:
+    if getattr(route,'path','').startswith(('/channels','/feedback','/favorites','/deals')):
+        app.router.routes.append(route)
 
-
-@app.post("/channels/{channel_id}/refresh")
-def refresh_channel(channel_id: int) -> dict[str, Any]:
-    channel = storage.get_channel(channel_id)
-    if channel is None:
-        raise HTTPException(status_code=404, detail="channel not found")
-    try:
-        new_count = _refresh_channel(channel)
-    except RuntimeError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-    return {
-        "ok": True,
-        "id": channel_id,
-        "new_count": new_count,
-        "listings": storage.get_channel_listings(channel_id),
-        "feedback": storage.get_all_feedback(),
-    }
-
-
-@app.get("/channels/{channel_id}/listings")
-def channel_listings(channel_id: int) -> dict[str, Any]:
-    channel = storage.get_channel(channel_id)
-    if channel is None:
-        raise HTTPException(status_code=404, detail="channel not found")
-    return {
-        "channel": channel,
-        "listings": storage.get_channel_listings(channel_id),
-        "feedback": storage.get_all_feedback(),
-    }
-
-
-# --------------------------------------------------------------------------- #
-# Favorites (feedback)                                                         #
-# --------------------------------------------------------------------------- #
-
-
-@app.post("/feedback")
-def set_feedback(req: FeedbackRequest) -> dict[str, Any]:
-    storage.set_feedback(
-        req.listing_url,
-        req.verdict,
-        title=req.title,
-        price=req.price,
-        price_display=req.price_display,
-        town=req.town,
-        thumbnail=req.thumbnail,
-        is_shop=req.is_shop,
-        shop_name=req.shop_name,
-    )
-    return {"ok": True, "listing_url": req.listing_url, "verdict": req.verdict}
-
-
-@app.get("/favorites")
-def favorites() -> dict[str, Any]:
-    return {"favorites": storage.get_favorites()}
-
-
-# Serve the SPA. Mounted last so API routes take precedence.
-app.mount("/", StaticFiles(directory="static", html=True), name="static")
+app.mount('/',StaticFiles(directory=Path(__file__).parent / 'static',html=True),name='static')

@@ -1,17 +1,21 @@
 services:
+  # Service key and volume kept for compatibility with the original deployment.
   subitowatch:
     build:
       context: .
       dockerfile: webapp/Dockerfile
-    image: subitowatch:latest
+    image: buywatcher:latest
     container_name: subitowatch
     ports:
-      # host 8081 -> container 8000 (8080 is used by jobspy-web locally)
-      - "8081:8000"
+      - "127.0.0.1:8081:8000"
+    env_file:
+      - path: .env
+        required: false
     volumes:
-      # Persist seen listings + favorites across container restarts.
       - subito-data:/data
     restart: unless-stopped
+    stop_grace_period: 3m
 
 volumes:
+  # Do NOT rename or remove: contains historical listings and favorites.
   subito-data:
