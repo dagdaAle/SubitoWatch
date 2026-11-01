@@ -96,6 +96,21 @@ Imposta `EBAY_CLIENT_ID` e `EBAY_CLIENT_SECRET` del tuo account sviluppatore.
 Il connettore usa OAuth client credentials, Browse search e getItem su `EBAY_IT`.
 OAuth e dettagli live non sono stati collaudati senza credenziali reali.
 
+eBay disabilita il keyset Production finché l'app non riceve le notifiche
+*Marketplace Account Deletion*. BuyWatcher conserva annunci e nome del venditore,
+quindi non può dichiarare l'esenzione: usa l'endpoint `/ebay/account-deletion`.
+
+1. Scegli un verification token di 32-80 caratteri (lettere, numeri, `_` e `-`).
+2. In Coolify imposta `EBAY_VERIFICATION_TOKEN` e `EBAY_DELETION_ENDPOINT` con l'URL
+   pubblico esatto, per esempio `https://subitowatch.intecha.dev/ebay/account-deletion`. Redeploy.
+3. In Authentik escludi dal forward-auth solo il percorso `^/ebay/account-deletion$`.
+4. Su developer.ebay.com → Alerts & Notifications: email, stesso URL, stesso token,
+   *Marketplace Account Deletion* → Save. eBay chiama la GET con `challenge_code` e la
+   risposta riattiva il keyset.
+
+Una notifica svuota il venditore negli annunci eBay e nel loro storico e rimette in
+coda la valutazione. La firma `X-EBAY-SIGNATURE` non è ancora verificata.
+
 Le capacità sono distinte:
 
 - Credenziali: ricerca e recupero dettagli dalla Browse API.

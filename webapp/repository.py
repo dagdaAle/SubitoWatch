@@ -198,6 +198,20 @@ def save_listing(topic_id, body):
     return listing_id
 
 
+def forget_ebay_seller(username):
+    """eBay Marketplace Account Deletion: blank the seller in listings, snapshots and their analyses."""
+    with connect() as db:
+        rows = db.execute("SELECT id,body FROM bw_listings WHERE source='ebay' AND json_extract(body,'$.seller')=?",
+                          (username,)).fetchall()
+        for row in rows:
+            body = {**json.loads(row['body']), 'seller': ''}
+            db.execute('UPDATE bw_listings SET body=?,content_hash=? WHERE id=?', (json.dumps(body), digest(body), row['id']))
+            db.execute("UPDATE bw_snapshots SET body=json_set(body,'$.seller','') WHERE listing_id=?", (row['id'],))
+            # The model's reason may quote the seller: drop the analysis, it is re-run on the next evaluation.
+            db.execute("UPDATE bw_matches SET state='pending',analysis=NULL,evaluation_key=NULL WHERE listing_id=?", (row['id'],))
+    return len(rows)
+
+
 def matches(topic_id):
     with connect() as db:
         rows = db.execute('''SELECT l.*,m.state,m.analysis,m.error,m.first_seen AS topic_first_seen,

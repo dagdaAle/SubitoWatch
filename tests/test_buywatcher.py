@@ -673,4 +673,28 @@ class SizePolicyTest(unittest.TestCase):
         self.assertIn('Taglia non nota',body['requirement_unknowns'])
 
 
+class EbayAccountDeletionTest(DatabaseFixture):
+    def test_disabled_without_configuration(self):
+        with TestClient(app) as client:
+            self.assertEqual(client.get('/ebay/account-deletion',params={'challenge_code':'x'}).status_code,404)
+
+    def test_challenge_and_seller_removal(self):
+        import hashlib
+        url='https://bw.example.com/ebay/account-deletion'
+        with patch.dict(os.environ,{'EBAY_VERIFICATION_TOKEN':'t'*40,'EBAY_DELETION_ENDPOINT':url}),TestClient(app) as client:
+            answer=client.get('/ebay/account-deletion',params={'challenge_code':'abc'}).json()
+            self.assertEqual(answer,{'challengeResponse':hashlib.sha256(('abc'+'t'*40+url).encode()).hexdigest()})
+            gone=repo.save_listing(self.t['id'],listing(1,source='ebay',seller='venditore1'))
+            kept=repo.save_listing(self.t['id'],listing(2,source='ebay',seller='altro'))
+            repo.save_evaluation(self.t['id'],gone,'evaluated',analysis(),'k')
+            body={'metadata':{'topic':'MARKETPLACE_ACCOUNT_DELETION'},
+                  'notification':{'notificationId':'n1','data':{'username':'venditore1','userId':'u1','eiasToken':'e'}}}
+            self.assertEqual(client.post('/ebay/account-deletion',json=body).status_code,204)
+            items={i['id']:i for i in repo.matches(self.t['id'])}
+            self.assertEqual(items[gone]['seller'],'')
+            self.assertEqual(items[gone]['state'],'pending')
+            self.assertEqual(items[kept]['seller'],'altro')
+            self.assertNotIn('venditore1',json.dumps(repo.history(gone)))
+
+
 if __name__=='__main__':unittest.main()
