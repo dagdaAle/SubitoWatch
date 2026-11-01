@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import hashlib
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -221,6 +222,42 @@ def feedback(topic_id:int,listing_id:int,body:FeedbackInput):
     except ValueError:
         raise HTTPException(404,'Annuncio non trovato nel topic')
     return {'ok':True}
+
+
+def ebay_deletion_config():
+    token,endpoint=os.getenv('EBAY_VERIFICATION_TOKEN',''),os.getenv('EBAY_DELETION_ENDPOINT','')
+    if not token or not endpoint:
+        raise HTTPException(404,'Not Found')
+    return token,endpoint
+
+
+# Public path (Authentik bypass): eBay Marketplace Account Deletion notifications.
+@app.get('/ebay/account-deletion')
+def ebay_challenge(challenge_code:str):
+    token,endpoint=ebay_deletion_config()
+    # eBay requires SHA-256 of challengeCode + verificationToken + endpoint, exactly as registered.
+    return {'challengeResponse':hashlib.sha256((challenge_code+token+endpoint).encode()).hexdigest()}
+
+
+class EbayDeletionData(BaseModel):
+    username:str=Field(default='',max_length=200)
+
+
+class EbayDeletionNotification(BaseModel):
+    data:EbayDeletionData
+
+
+class EbayDeletionInput(BaseModel):
+    notification:EbayDeletionNotification
+
+
+@app.post('/ebay/account-deletion',status_code=204)
+def ebay_account_deletion(body:EbayDeletionInput):
+    ebay_deletion_config()
+    # shortcut: X-EBAY-SIGNATURE is not verified, so anyone can blank a seller name (no other effect);
+    # verify it with the Notification API public key once the keyset is active.
+    if body.notification.data.username:
+        repo.forget_ebay_seller(body.notification.data.username)
 
 
 # Keep old MCP routes and storage contracts. No legacy scheduler is started.
