@@ -48,7 +48,7 @@ portati per primi.
 | Backend | Python 3.13, FastAPI, Pydantic v2, SQLAlchemy 2, Alembic, `pydantic-settings` |
 | HTTP verso fonti e LLM | `httpx`; `curl_cffi` solo dove serve l'impronta TLS di un browser (Vinted, Subito) |
 | Immagini | Pillow (+ AVIF), normalizzate a JPEG prima dell'LLM |
-| Database | SQLite in WAL sul volume `subito-data` — vedi adr/002 **(scelta di Claude)** |
+| Database | SQLite in WAL sul volume `subito-data` — vedi [adr/003](adr/003-sqlite-un-processo.md) **(scelta di Claude)** |
 | Frontend | React + TypeScript + Vite, Mantine, TanStack Query, client da OpenAPI (come todo-app) |
 | LLM | qualunque endpoint `POST /chat/completions` con `json_schema`; oggi Ollama locale |
 | Deploy | Docker, Coolify, Authentik, `subitowatch.intecha.dev` (poi `buywatcher.intecha.dev`) |
@@ -247,7 +247,7 @@ dell'HTML è un **errore**, non una ricerca vuota. I connettori si testano su ri
 ## Worker e scheduler
 
 - **Un solo processo uvicorn, un solo thread di lavoro** (`ThreadPoolExecutor(max_workers=1)`): le fonti
-  vanno distanziate comunque e SQLite ha un solo scrittore. Vedi adr/002.
+  vanno distanziate comunque e SQLite ha un solo scrittore. Vedi [adr/003](adr/003-sqlite-un-processo.md).
 - Lo scheduler controlla ogni 60 s i topic `active` e non archiviati: se l'ultima esecuzione è partita da più di
   `interval_hours`, ne accoda una. Salvare un topic non avvia ricerche nascoste.
 - **Riavvio**: le esecuzioni `running` diventano `interrupted`, le valutazioni `evaluating` tornano `pending`.
