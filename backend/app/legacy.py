@@ -34,8 +34,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-import scraper
-import storage
+from app.sources import subito as scraper
+from app.repositories import legacy_storage as storage
 import os
 
 app = FastAPI(title="SubitoWatch", version="2.0.0")
@@ -253,4 +253,4 @@ def get_deals() -> dict[str, Any]:
 
 
 # Serve the SPA. Mounted last so API routes take precedence.
-app.mount("/", StaticFiles(directory=Path(__file__).parent / "static", html=True), name="static")
+app.mount("/", StaticFiles(directory=Path(__file__).parent / "static", html=True, check_dir=False), name="static")

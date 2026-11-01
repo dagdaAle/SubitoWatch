@@ -10,18 +10,20 @@ from datetime import datetime, timezone
 from typing import Literal
 from collections import Counter
 
-from fastapi import FastAPI, HTTPException
+from fastapi import APIRouter, FastAPI, Header
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError
 
-import ai
-import engine
-import legacy
-import repository as repo
-import scoring
-import sources
-import personalization
-from models import ListingInput, TopicInput, BuyerProfile
+from app.services import ai
+from app.services import engine
+from app import legacy
+from app.repositories import topics as repo
+from app.services import scoring
+from app import sources
+from app.services import personalization
+from app import errors
+from app.errors import ApiError
+from app.schemas import ListingInput, TopicInput, BuyerProfile
 
 
 @asynccontextmanager
@@ -33,21 +35,31 @@ async def lifespan(app):
     app.state.worker.close()
 
 
-app=FastAPI(title='BuyWatcher',version='3.0.0',lifespan=lifespan)
+app=FastAPI(title='BuyWatcher',version='3.1.0',lifespan=lifespan,
+            # operation_id = function name: stable names for generated clients and MCP parity.
+            generate_unique_id_function=lambda route:route.name)
+errors.install(app)
+router=APIRouter()
 
 
 def require_topic(topic_id):
     topic=repo.get_topic(topic_id)
     if not topic:
-        raise HTTPException(404,'Topic non trovato')
+        raise ApiError(404,'topic_not_found','Topic non trovato')
     return topic
+
+
+def check_version(if_match,revision):
+    # shortcut: If-Match is optional until every client sends it; then answer 428 when missing.
+    if if_match is not None and if_match.strip('"')!=str(revision):
+        raise ApiError(412,'version_mismatch',f'Versione cambiata: attuale {revision}. Ricarica e riprova.')
 
 
 def require_idle(topic_id):
     require_topic(topic_id)
     previous=repo.runs(topic_id)
     if previous and previous[0]['state']=='running':
-        raise HTTPException(409,'Attendi il completamento della ricerca in corso.')
+        raise ApiError(409,'run_in_progress','Attendi il completamento della ricerca in corso.')
 
 
 @app.get('/health')
@@ -57,14 +69,14 @@ def health():
     return {'ok':True,'app':'BuyWatcher','ai_configured':ai.configured()}
 
 
-@app.get('/api/config')
+@router.get('/config')
 def config():
     return {'app':'BuyWatcher','ai_configured':ai.configured(),
             'vision_configured':bool(ai.configured() and os.getenv('BUYWATCHER_VISION_MODEL')),
             'sources':sources.catalog()}
 
 
-@app.get('/api/topics')
+@router.get('/topics')
 def topics():
     topics=repo.list_topics()
     for topic in topics:
@@ -83,34 +95,36 @@ def current_items(topic):
     return items
 
 
-@app.get('/api/topics/{topic_id}/marketplaces')
+@router.get('/topics/{topic_id}/marketplaces')
 def marketplaces(topic_id:int):
     return {'marketplaces':sources.marketplace_searches(require_topic(topic_id))}
 
 
-@app.get('/api/profile')
+@router.get('/profile')
 def profile():
     return {'profile':repo.get_profile()}
 
 
-@app.put('/api/profile')
-def update_profile(body:BuyerProfile):
+@router.put('/profile')
+def update_profile(body:BuyerProfile,if_match:str|None=Header(default=None)):
+    check_version(if_match,repo.get_profile()['revision'])
     profile,affected=repo.save_profile(body.model_dump())
     return {'profile':profile,'affected_topic_ids':affected}
 
 
-@app.post('/api/topics',status_code=201)
+@router.post('/topics',status_code=201)
 def create_topic(body:TopicInput):
     return {'topic':repo.save_topic(body.model_dump())}
 
 
-@app.put('/api/topics/{topic_id}')
-def update_topic(topic_id:int,body:TopicInput):
+@router.put('/topics/{topic_id}')
+def update_topic(topic_id:int,body:TopicInput,if_match:str|None=Header(default=None)):
     require_idle(topic_id)
+    check_version(if_match,require_topic(topic_id)['revision'])
     return {'topic':repo.save_topic(body.model_dump(),topic_id)}
 
 
-@app.delete('/api/topics/{topic_id}')
+@router.delete('/topics/{topic_id}')
 def delete_topic(topic_id:int):
     require_idle(topic_id)
     repo.delete_topic(topic_id)
@@ -121,7 +135,7 @@ class PlanInput(BaseModel):
     need:str=Field(min_length=3,max_length=4000)
 
 
-@app.post('/api/topic-plan')
+@router.post('/topic-plan')
 def plan_topic(body:PlanInput):
     try:
         proposal=ai.plan(body.need)
@@ -129,60 +143,60 @@ def plan_topic(body:PlanInput):
         proposal={k:v for k,v in proposal.items() if k in allowed}
         return {'topic':TopicInput.model_validate({**proposal,'need':body.need}).model_dump()}
     except (RuntimeError,ValidationError,TypeError,AttributeError):
-        raise HTTPException(503,'Proposta non disponibile. Configura il modello o compila il topic manualmente.')
+        raise ApiError(503,'ai_unavailable','Proposta non disponibile. Configura il modello o compila il topic manualmente.')
 
 
 class RunOptions(BaseModel):
     max_evaluations:int|None=Field(default=None,ge=1,le=200)
 
 
-@app.post('/api/topics/{topic_id}/refresh',status_code=202)
+@router.post('/topics/{topic_id}/refresh',status_code=202)
 def refresh(topic_id:int,body:RunOptions|None=None):
     require_topic(topic_id)
     run_id=app.state.worker.submit(topic_id,max_evaluations=body.max_evaluations if body else None)
     if run_id is None:
-        raise HTTPException(409,'Una ricerca per questo topic è già in corso.')
+        raise ApiError(409,'run_in_progress','Una ricerca per questo topic è già in corso.')
     return {'run_id':run_id}
 
 
-@app.post('/api/topics/{topic_id}/evaluate',status_code=202)
+@router.post('/topics/{topic_id}/evaluate',status_code=202)
 def evaluate(topic_id:int,body:RunOptions|None=None):
     require_topic(topic_id)
     run_id=app.state.worker.submit(topic_id,False,max_evaluations=body.max_evaluations if body else None)
     if run_id is None:
-        raise HTTPException(409,'Una valutazione per questo topic è già in corso.')
+        raise ApiError(409,'run_in_progress','Una valutazione per questo topic è già in corso.')
     return {'run_id':run_id}
 
 
-@app.get('/api/topics/{topic_id}/runs')
+@router.get('/topics/{topic_id}/runs')
 def runs(topic_id:int):
     require_topic(topic_id)
     return {'runs':repo.runs(topic_id)}
 
 
-@app.get('/api/runs/{run_id}')
+@router.get('/runs/{run_id}')
 def get_run(run_id:int):
     result=repo.get_run(run_id)
     if result is None:
-        raise HTTPException(404,'Processo non trovato')
+        raise ApiError(404,'run_not_found','Processo non trovato')
     return result
 
 
-@app.post('/api/topics/{topic_id}/listings',status_code=201)
+@router.post('/topics/{topic_id}/listings',status_code=201)
 def import_listing(topic_id:int,body:ListingInput):
     require_idle(topic_id)
     # A caller cannot spoof official sources or bypass per-source access/AI policy.
     if body.source!='manual':
-        raise HTTPException(422,'Gli annunci inseriti da te devono usare la fonte manual.')
+        raise ApiError(422,'source_not_manual','Gli annunci inseriti da te devono usare la fonte manual.')
     try:
         listing_id=repo.save_listing(topic_id,body.model_dump())
     except ValueError as exc:
-        raise HTTPException(409,str(exc)) from exc
+        raise ApiError(409,'listing_source_conflict',str(exc)) from exc
     run_id=app.state.worker.submit(topic_id,False)
     return {'listing_id':listing_id,'run_id':run_id}
 
 
-@app.get('/api/topics/{topic_id}/listings')
+@router.get('/topics/{topic_id}/listings')
 def listings(topic_id:int):
     topic=require_topic(topic_id)
     items=current_items(topic)
@@ -205,7 +219,7 @@ def listings(topic_id:int):
     return {'topic':topic,'listings':items}
 
 
-@app.get('/api/listings/{listing_id}/history')
+@router.get('/listings/{listing_id}/history')
 def history(listing_id:int):
     return {'history':repo.history(listing_id)}
 
@@ -214,20 +228,20 @@ class FeedbackInput(BaseModel):
     verdict:Literal['like','dislike']|None=None
 
 
-@app.post('/api/topics/{topic_id}/listings/{listing_id}/feedback')
+@router.post('/topics/{topic_id}/listings/{listing_id}/feedback')
 def feedback(topic_id:int,listing_id:int,body:FeedbackInput):
     require_topic(topic_id)
     try:
         repo.set_feedback(topic_id,listing_id,body.verdict)
     except ValueError:
-        raise HTTPException(404,'Annuncio non trovato nel topic')
+        raise ApiError(404,'listing_not_in_topic','Annuncio non trovato nel topic')
     return {'ok':True}
 
 
 def ebay_deletion_config():
     token,endpoint=os.getenv('EBAY_VERIFICATION_TOKEN',''),os.getenv('EBAY_DELETION_ENDPOINT','')
     if not token or not endpoint:
-        raise HTTPException(404,'Not Found')
+        raise ApiError(404,'not_found','Not Found')
     return token,endpoint
 
 
@@ -260,10 +274,17 @@ def ebay_account_deletion(body:EbayDeletionInput):
         repo.forget_ebay_seller(body.notification.data.username)
 
 
+app.include_router(router,prefix='/api/v1')
+# shortcut: unversioned alias for today's frontend; remove when the new frontend (plan 04) ships.
+app.include_router(router,prefix='/api',include_in_schema=False)
+
+
 # Keep old MCP routes and storage contracts. No legacy scheduler is started.
 # These routes remain isolated from the evaluated BuyWatcher feed.
 for route in legacy.app.routes:
     if getattr(route,'path','').startswith(('/channels','/feedback','/favorites','/deals')):
         app.router.routes.append(route)
 
-app.mount('/',StaticFiles(directory=Path(__file__).parent / 'static',html=True),name='static')
+STATIC=Path(__file__).parent / 'static'
+STATIC.mkdir(exist_ok=True)  # the frontend build is not committed; tests and dev run without it
+app.mount('/',StaticFiles(directory=STATIC,html=True),name='static')

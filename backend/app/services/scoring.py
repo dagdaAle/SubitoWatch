@@ -3,7 +3,7 @@ from statistics import median
 from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
-import sources
+from app import sources
 
 
 def stale(item):

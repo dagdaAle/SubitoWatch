@@ -9,22 +9,20 @@ import unittest
 from urllib.parse import urlsplit, parse_qs
 from unittest.mock import patch
 
-sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'webapp'))
-os.chdir(Path(__file__).resolve().parents[1]/'webapp')
 
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
-import ai
-import personalization
-import engine
-import repository as repo
-import scoring
-import scraper
-import sources
-import images as image_loader
-import storage
-from app import app
-from models import Analysis,ListingInput,TopicInput
+from app.services import ai
+from app.services import personalization
+from app.services import engine
+from app.repositories import topics as repo
+from app.services import scoring
+from app.sources import subito as scraper
+from app import sources
+from app.services import images as image_loader
+from app.repositories import legacy_storage as storage
+from app.main import app
+from app.schemas import Analysis,ListingInput,TopicInput
 
 
 def topic(**kw):
@@ -84,7 +82,7 @@ class DatabaseTest(DatabaseFixture):
 
     def test_cache_and_changed_content(self):
         repo.save_listing(self.t['id'],listing())
-        with patch('ai.configured',return_value=True),patch('ai.evaluate',return_value=analysis()) as evaluate:
+        with patch('app.services.ai.configured',return_value=True),patch('app.services.ai.evaluate',return_value=analysis()) as evaluate:
             self.assertEqual(engine.evaluate_pending(self.t)['evaluated'],1)
             self.assertEqual(engine.evaluate_pending(self.t)['cached'],1)
             changed=listing();changed['description']='Descrizione modificata'
@@ -95,7 +93,7 @@ class DatabaseTest(DatabaseFixture):
     def test_ai_limit_prioritizes_publication_not_reverse_insertion(self):
         recent=repo.save_listing(self.t['id'],listing(1,published_at='2026-10-20 10:00:00'))
         repo.save_listing(self.t['id'],listing(2,published_at='2026-08-01T10:00:00+00:00'))
-        with patch.dict(os.environ,{'BUYWATCHER_MAX_AI_PER_RUN':'1'}),patch('ai.configured',return_value=True),patch('ai.evaluate',return_value=analysis()) as evaluate:
+        with patch.dict(os.environ,{'BUYWATCHER_MAX_AI_PER_RUN':'1'}),patch('app.services.ai.configured',return_value=True),patch('app.services.ai.evaluate',return_value=analysis()) as evaluate:
             report=engine.evaluate_pending(self.t)
         self.assertEqual(evaluate.call_args.args[1]['id'],recent)
         self.assertEqual(report['evaluated'],1)
@@ -108,7 +106,7 @@ class DatabaseTest(DatabaseFixture):
 
     def test_requested_sample_cannot_exceed_server_budget(self):
         for n in range(3):repo.save_listing(self.t['id'],listing(n))
-        with patch.dict(os.environ,{'BUYWATCHER_MAX_AI_PER_RUN':'2'}),patch('ai.configured',return_value=True),patch('ai.evaluate',return_value=analysis()) as evaluate:
+        with patch.dict(os.environ,{'BUYWATCHER_MAX_AI_PER_RUN':'2'}),patch('app.services.ai.configured',return_value=True),patch('app.services.ai.evaluate',return_value=analysis()) as evaluate:
             self.assertEqual(engine.evaluate_pending(self.t,max_evaluations=1)['evaluated'],1)
             self.assertEqual(engine.evaluate_pending(self.t,max_evaluations=200)['evaluated'],2)
         self.assertEqual(evaluate.call_count,3)
@@ -144,7 +142,7 @@ class DatabaseTest(DatabaseFixture):
         def changed(*args):
             repo.save_profile({'shoe_size_eu':45,'clothing_sizes':[]})
             return analysis()
-        with patch('ai.configured',return_value=True),patch('ai.evaluate',side_effect=changed):
+        with patch('app.services.ai.configured',return_value=True),patch('app.services.ai.evaluate',side_effect=changed):
             result=engine.evaluate_pending(t)
         self.assertEqual(result['pending'],1)
         self.assertEqual(repo.matches(t['id'])[0]['state'],'pending')
@@ -165,7 +163,7 @@ class DatabaseTest(DatabaseFixture):
     def test_failed_source_never_success(self):
         t=repo.save_topic(topic(sources=['subito']))
         run_id=repo.start_run(t['id'])
-        with patch.dict(os.environ,{'BUYWATCHER_ENABLE_SUBITO':'true'}),patch('sources.search',side_effect=RuntimeError('outage')),patch('engine.time.sleep'):
+        with patch.dict(os.environ,{'BUYWATCHER_ENABLE_SUBITO':'true'}),patch('app.sources.search',side_effect=RuntimeError('outage')),patch('app.services.engine.time.sleep'):
             engine.run(t['id'],run_id)
         run=repo.get_run(run_id)
         self.assertEqual(run['state'],'partial')
@@ -175,7 +173,7 @@ class DatabaseTest(DatabaseFixture):
         t=repo.save_topic({**topic(sources=['subito']),'keywords':['good','bad']})
         run_id=repo.start_run(t['id'])
         raw={'listing_url':'https://www.subito.it/test.htm','title':'Oggetto','price':50}
-        with patch.dict(os.environ,{'BUYWATCHER_ENABLE_SUBITO':'true'}),patch('sources.search',side_effect=[[raw],RuntimeError('outage')]),patch('engine.time.sleep'):
+        with patch.dict(os.environ,{'BUYWATCHER_ENABLE_SUBITO':'true'}),patch('app.sources.search',side_effect=[[raw],RuntimeError('outage')]),patch('app.services.engine.time.sleep'):
             engine.run(t['id'],run_id)
         self.assertEqual(len(repo.matches(t['id'])),1)
         self.assertEqual(repo.get_run(run_id)['report']['sources']['subito']['state'],'partial')
@@ -261,17 +259,17 @@ class ExtractionTest(unittest.TestCase):
         self.assertEqual(scraper._extract_ads(html),[])
 
     def test_failed_legacy_keywords_raise(self):
-        with patch('scraper.search',side_effect=RuntimeError('offline')):
+        with patch('app.sources.subito.search',side_effect=RuntimeError('offline')):
             with self.assertRaises(RuntimeError):scraper.search_keywords(['one','two'])
 
     def test_photo_evidence_requires_attached_images(self):
         a=analysis();a['observations']=[{'claim':'Danno','basis':'image','detail':'Foto 1','image_index':0}]
-        with patch.dict(os.environ,{'BUYWATCHER_AI_MODEL':'test','BUYWATCHER_VISION_MODEL':''}),patch('ai.triage',return_value=triage_pass()),patch('ai.complete',return_value=a):
+        with patch.dict(os.environ,{'BUYWATCHER_AI_MODEL':'test','BUYWATCHER_VISION_MODEL':''}),patch('app.services.ai.triage',return_value=triage_pass()),patch('app.services.ai.complete',return_value=a):
             with self.assertRaises(RuntimeError):ai.evaluate(topic(),listing())
 
     def test_certain_text_exclusion_skips_photo_download_and_analysis(self):
         result={'decision':'exclude','reason':'Si vende un PC completo, non la singola scheda.'}
-        with patch.dict(os.environ,{'BUYWATCHER_AI_MODEL':'text-test','BUYWATCHER_VISION_MODEL':'vision-test'}),patch('ai.complete',return_value=result) as complete,patch('images.prepare') as prepare:
+        with patch.dict(os.environ,{'BUYWATCHER_AI_MODEL':'text-test','BUYWATCHER_VISION_MODEL':'vision-test'}),patch('app.services.ai.complete',return_value=result) as complete,patch('app.services.images.prepare') as prepare:
             body=ai.evaluate(topic(),listing(images=['https://example.com/photo.jpg']))
         self.assertEqual(body['relevance'],0)
         self.assertEqual(body['evaluation_stage'],'text_filter')
@@ -281,7 +279,7 @@ class ExtractionTest(unittest.TestCase):
 
     def test_ambiguous_text_continues_to_photo_analysis(self):
         result=triage_pass().model_dump()
-        with patch.dict(os.environ,{'BUYWATCHER_AI_MODEL':'text-test','BUYWATCHER_VISION_MODEL':'vision-test'}),patch('ai.complete',side_effect=[result,analysis()]) as complete,patch('images.prepare',return_value=([],[])) as prepare:
+        with patch.dict(os.environ,{'BUYWATCHER_AI_MODEL':'text-test','BUYWATCHER_VISION_MODEL':'vision-test'}),patch('app.services.ai.complete',side_effect=[result,analysis()]) as complete,patch('app.services.images.prepare',return_value=([],[])) as prepare:
             body=ai.evaluate(topic(),listing())
         self.assertEqual(body['evaluation_stage'],'full_analysis')
         self.assertEqual(complete.call_count,2)
@@ -298,7 +296,7 @@ class ExtractionTest(unittest.TestCase):
 
     def test_provider_uses_constrained_schema_and_labels_each_photo(self):
         schema=ai.analysis_schema(1)
-        with patch.dict(os.environ,{'BUYWATCHER_AI_BASE_URL':'https://example.com/v1','BUYWATCHER_AI_MODEL':'test','BUYWATCHER_VISION_MODEL':'vision-test'}),patch('ai.httpx.Client') as client:
+        with patch.dict(os.environ,{'BUYWATCHER_AI_BASE_URL':'https://example.com/v1','BUYWATCHER_AI_MODEL':'test','BUYWATCHER_VISION_MODEL':'vision-test'}),patch('app.services.ai.httpx.Client') as client:
             response=client.return_value.__enter__.return_value.post.return_value
             response.json.return_value={'choices':[{'message':{'content':'{}'}}]}
             ai.complete('system',{'output_schema':schema},images=['data:image/jpeg;base64,test'])
@@ -326,7 +324,7 @@ class ExtractionTest(unittest.TestCase):
     def test_vision_prepares_base64_and_remaps_photo_indexes(self):
         a=analysis();a['observations']=[{'claim':'Dettaglio','basis':'image','detail':'Foto allegata','image_index':0}]
         ad=listing();ad['images']=['https://example.com/missing.jpg','https://example.com/visible.jpg']
-        with patch.dict(os.environ,{'BUYWATCHER_AI_MODEL':'test','BUYWATCHER_VISION_MODEL':'vision-test'}),patch('ai.triage',return_value=triage_pass()),patch('images.prepare',return_value=(['data:image/jpeg;base64,/9j/'],[1])),patch('ai.complete',return_value=a) as complete:
+        with patch.dict(os.environ,{'BUYWATCHER_AI_MODEL':'test','BUYWATCHER_VISION_MODEL':'vision-test'}),patch('app.services.ai.triage',return_value=triage_pass()),patch('app.services.images.prepare',return_value=(['data:image/jpeg;base64,/9j/'],[1])),patch('app.services.ai.complete',return_value=a) as complete:
             result=ai.evaluate(topic(),ad)
         self.assertEqual(result['observations'][0]['image_index'],1)
         self.assertEqual(result['images_examined'],1)
@@ -336,13 +334,13 @@ class ExtractionTest(unittest.TestCase):
     def test_image_fetch_rejects_private_dns_resolution(self):
         import socket
         addresses=[(socket.AF_INET,socket.SOCK_STREAM,6,'',('127.0.0.1',443))]
-        with patch('images.socket.getaddrinfo',return_value=addresses),self.assertRaises(ValueError):
+        with patch('app.services.images.socket.getaddrinfo',return_value=addresses),self.assertRaises(ValueError):
             image_loader.public_target('https://images.example.com/photo.jpg')
 
     def test_image_connection_pins_the_resolved_address(self):
         import socket
         addresses=[(socket.AF_INET,socket.SOCK_STREAM,6,'',('93.184.216.34',443))]
-        with patch('images.socket.getaddrinfo',return_value=addresses):
+        with patch('app.services.images.socket.getaddrinfo',return_value=addresses):
             url,host,sni=image_loader.public_target('https://images.example.com/photo.jpg?q=1')
         self.assertEqual(url,'https://93.184.216.34/photo.jpg?q=1')
         self.assertEqual(host,'images.example.com')
@@ -410,7 +408,7 @@ class MarketplaceTest(DatabaseFixture):
             self.assertEqual(vinted()['status'],'setup')
 
     def test_marketplace_endpoint_is_read_only_and_never_collects(self):
-        with TestClient(app) as client,patch('sources.search') as search:
+        with TestClient(app) as client,patch('app.sources.search') as search:
             before=repo.get_topic(self.t['id'])
             key=engine.key_for(before,{'content_hash':'test','source':'manual'})
             response=client.get(f"/api/topics/{self.t['id']}/marketplaces")
@@ -481,7 +479,7 @@ class VintedTest(DatabaseFixture):
 
     def test_search_refreshes_cookie_once_on_401(self):
         landing = _FakeResp(200, cookies={'access_token_web': 'tok'}, headers={'X-Anon-Id': 'anon'})
-        with patch('sources.cffi.get', side_effect=[landing, _FakeResp(401), landing, _FakeResp(200, json_data={'items': [VINTED_RAW]})]) as get:
+        with patch('app.sources.cffi.get', side_effect=[landing, _FakeResp(401), landing, _FakeResp(200, json_data={'items': [VINTED_RAW]})]) as get:
             items = sources.VINTED.search('gioco', {})
         self.assertEqual(items, [VINTED_RAW])
         self.assertEqual(get.call_count, 4)
@@ -494,7 +492,7 @@ class VintedTest(DatabaseFixture):
                 raise sources.SourceError('Vinted ha rifiutato la richiesta.')
             return [{'listing_url': 'https://www.subito.it/x.htm', 'title': 'Oggetto', 'price': 50}]
         with patch.dict(os.environ, {'BUYWATCHER_ENABLE_SUBITO': 'true', 'BUYWATCHER_ENABLE_VINTED': 'true'}), \
-             patch('sources.search', side_effect=fake_search), patch('engine.time.sleep'):
+             patch('app.sources.search', side_effect=fake_search), patch('app.services.engine.time.sleep'):
             run_id = repo.start_run(t['id'])
             engine.run(t['id'], run_id)
         run = repo.get_run(run_id)
@@ -520,7 +518,7 @@ class VintedTest(DatabaseFixture):
         t = repo.save_topic(topic(sources=['vinted']))
         raws = [dict(VINTED_RAW, id=n, url=f'https://www.vinted.it/items/{n}-oggetto') for n in (1, 2, 3)]
         with patch.dict(os.environ, {'BUYWATCHER_ENABLE_VINTED': 'true'}), \
-             patch('sources.search', return_value=raws + [raws[0]]), patch('engine.time.sleep'):
+             patch('app.sources.search', return_value=raws + [raws[0]]), patch('app.services.engine.time.sleep'):
             run_id = repo.start_run(t['id'])
             engine.run(t['id'], run_id)
         self.assertEqual(repo.get_run(run_id)['report']['sources']['vinted']['found'], 3)
@@ -528,14 +526,14 @@ class VintedTest(DatabaseFixture):
     def test_topic_without_vinted_never_calls_connector(self):
         t = repo.save_topic(topic(sources=['subito']))
         with patch.dict(os.environ, {'BUYWATCHER_ENABLE_SUBITO': 'true'}), \
-             patch('sources.search', return_value=[]) as search, patch('engine.time.sleep'):
+             patch('app.sources.search', return_value=[]) as search, patch('app.services.engine.time.sleep'):
             run_id = repo.start_run(t['id'])
             engine.run(t['id'], run_id)
         self.assertEqual([c.args[0] for c in search.call_args_list], ['subito'])
 
     def test_disabled_source_reports_disabled(self):
         t = repo.save_topic(topic(sources=['vinted']))
-        with patch('sources.VINTED.search') as vsearch:
+        with patch('app.sources.VINTED.search') as vsearch:
             run_id = repo.start_run(t['id'])
             engine.run(t['id'], run_id)
         vsearch.assert_not_called()
@@ -591,7 +589,7 @@ class ApiTest(DatabaseFixture):
             response=client.post('/api/topics',json=topic());self.assertEqual(response.status_code,201)
             t=response.json()['topic'];tid=t['id']
             self.assertEqual(client.post('/api/topics',json={**topic(),'budget':-1}).status_code,422)
-            with patch('ai.configured',return_value=True),patch('ai.evaluate',return_value=analysis()):
+            with patch('app.services.ai.configured',return_value=True),patch('app.services.ai.evaluate',return_value=analysis()):
                 r=client.post(f'/api/topics/{tid}/listings',json=listing())
                 self.assertEqual(r.status_code,201)
                 app.state.worker.pool.submit(lambda:None).result(timeout=5)
@@ -604,6 +602,9 @@ class ApiTest(DatabaseFixture):
             self.assertEqual(client.get('/api/topics/9999/listings').status_code,404)
             self.assertEqual(client.get('/api/runs/9999').status_code,404)
             self.assertEqual(client.post('/api/topic-plan',json={'need':'test'}).status_code,503)
+            index=Path(__file__).resolve().parents[1]/'app'/'static'/'index.html'
+            if not index.exists():  # the frontend build is not committed: stand in for it
+                index.write_text('<!doctype html><title>BuyWatcher</title>')
             self.assertEqual(client.get('/').status_code,200)
             self.assertIn('BuyWatcher',client.get('/').text)
             self.assertEqual(client.delete(f'/api/topics/{tid}').status_code,200)
@@ -662,7 +663,7 @@ class SizePolicyTest(unittest.TestCase):
     def test_size_exclusion_skips_all_inference(self):
         t=topic(profile_scope='footwear');t['buyer_profile']={'shoe_size_eu':44}
         ad=listing();ad['title']='Scarpe taglia 42'
-        with patch.dict(os.environ,{'BUYWATCHER_AI_MODEL':'test'}),patch('ai.complete') as complete,patch('images.prepare') as prepare:
+        with patch.dict(os.environ,{'BUYWATCHER_AI_MODEL':'test'}),patch('app.services.ai.complete') as complete,patch('app.services.images.prepare') as prepare:
             body=ai.evaluate(t,ad)
         self.assertEqual(body['evaluation_stage'],'size_filter')
         self.assertTrue(body['requirement_failures'])
@@ -695,6 +696,35 @@ class EbayAccountDeletionTest(DatabaseFixture):
             self.assertEqual(items[gone]['state'],'pending')
             self.assertEqual(items[kept]['seller'],'altro')
             self.assertNotIn('venditore1',json.dumps(repo.history(gone)))
+
+
+class ApiV1Test(DatabaseFixture):
+    def test_openapi_snapshot_is_current(self):
+        from app import export_openapi
+        self.assertEqual(export_openapi.PATH.read_text(),export_openapi.render(),
+                         'API cambiata: rigenera con uv run python -m app.export_openapi')
+
+    def test_v1_routes_operation_ids_and_problem_details(self):
+        with TestClient(app) as client:
+            spec=client.get('/openapi.json').json()
+            self.assertIn('/api/v1/topics',spec['paths'])
+            self.assertFalse([p for p in spec['paths'] if p.startswith('/api/') and not p.startswith('/api/v1/')
+                              and not p.startswith(('/api/channels','/api/feedback','/api/favorites','/api/deals'))])
+            self.assertEqual(spec['paths']['/api/v1/topics']['post']['operationId'],'create_topic')
+            response=client.get('/api/v1/topics/9999/listings')
+            self.assertEqual(response.status_code,404)
+            self.assertEqual(response.headers['content-type'],'application/problem+json')
+            self.assertEqual(response.json()['code'],'topic_not_found')
+            invalid=client.post('/api/v1/topics',json={'name':''})
+            self.assertEqual((invalid.status_code,invalid.json()['code']),(422,'validation_error'))
+
+    def test_if_match_on_topic_update(self):
+        with TestClient(app) as client:
+            current=self.t['revision']
+            stale=client.put(f"/api/v1/topics/{self.t['id']}",json=topic(),headers={'If-Match':str(current+5)})
+            self.assertEqual((stale.status_code,stale.json()['code']),(412,'version_mismatch'))
+            ok=client.put(f"/api/v1/topics/{self.t['id']}",json=topic(),headers={'If-Match':f'"{current}"'})
+            self.assertEqual(ok.json()['topic']['revision'],current+1)
 
 
 if __name__=='__main__':unittest.main()

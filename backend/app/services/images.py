@@ -12,7 +12,7 @@ from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import httpx
 from PIL import Image, ImageOps, UnidentifiedImageError
-from models import public_url
+from app.schemas import public_url
 
 MAX_BYTES = 4 * 1024 * 1024
 Image.MAX_IMAGE_PIXELS = 20_000_000

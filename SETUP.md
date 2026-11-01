@@ -241,17 +241,14 @@ annunci con giudizi umani per categoria.
 ## 5. Sviluppo locale
 
 ```sh
-python3 -m venv .venv
-.venv/bin/pip install -r webapp/requirements.txt
-npm ci --prefix webapp/frontend
-npm run build --prefix webapp/frontend
-cd webapp
-../.venv/bin/uvicorn app:app --host 127.0.0.1 --port 8081
+cd frontend && npm ci && npm run build
+cd ../backend && uv sync
+uv run uvicorn app.main:app --host 127.0.0.1 --port 8081
 ```
 
 Carica le variabili nel processo (o usa Docker Compose con `.env`); il server Python
 non carica automaticamente `.env`. Con UI Vite usa `npm run dev` da
-`webapp/frontend`; proxy `/api` e `/health` verso `http://localhost:8081`.
+`frontend`; proxy `/api` e `/health` verso `http://localhost:8081`.
 
 ## 6. Protezione e ripristino
 

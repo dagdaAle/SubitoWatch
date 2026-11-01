@@ -7,9 +7,9 @@ from copy import deepcopy
 
 import httpx
 
-from models import Analysis, TextTriage
-import images as image_loader
-import personalization
+from app.schemas import Analysis, TextTriage
+from app.services import images as image_loader
+from app.services import personalization
 
 VERSION = 'buywatcher-5'
 

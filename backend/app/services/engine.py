@@ -8,11 +8,11 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
-import ai
-import repository as repo
-import sources
-import personalization
-from models import ListingInput
+from app.services import ai
+from app.repositories import topics as repo
+from app import sources
+from app.services import personalization
+from app.schemas import ListingInput
 
 log=logging.getLogger('buywatcher')
 

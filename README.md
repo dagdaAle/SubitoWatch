@@ -51,11 +51,8 @@ servizio Compose restano compatibili con SubitoWatch. Non usare `down -v`.
 ## Verifica
 
 ```sh
-python3 -m venv .venv
-.venv/bin/pip install -r webapp/requirements.txt
-.venv/bin/python -B -m unittest discover -s tests -v
-npm ci --prefix webapp/frontend
-npm run build --prefix webapp/frontend
+cd backend && uv sync && uv run pytest -q
+cd ../frontend && npm ci && npm run build
 ```
 
 I test non contattano marketplace o provider AI: verificano migrazioni, contratti,
