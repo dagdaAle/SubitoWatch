@@ -8,6 +8,7 @@ import sqlite3
 import threading
 from contextlib import closing, contextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from app.repositories import legacy_storage as storage
@@ -33,48 +34,23 @@ def connect():
         yield conn
 
 
+def upgrade_schema(path):
+    """The schema belongs to Alembic (backend/alembic); every start brings the DB to head."""
+    from alembic import command
+    from alembic.config import Config
+    config = Config()
+    config.set_main_option('script_location', str(Path(__file__).resolve().parents[2] / 'alembic'))
+    config.set_main_option('sqlalchemy.url', 'sqlite:///' + str(path))
+    command.upgrade(config, 'head')
+
+
 def init_db():
     if os.getenv('BUYWATCHER_DB'):
         storage._DB_PATH = os.environ['BUYWATCHER_DB']
     storage.init_db()
+    upgrade_schema(os.getenv('BUYWATCHER_DB') or storage._DB_PATH)
     with connect() as db:
         db.execute('PRAGMA journal_mode=WAL')
-        db.executescript('''
-        CREATE TABLE IF NOT EXISTS bw_topics (
-            id INTEGER PRIMARY KEY, body TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 1,
-            created_at TEXT NOT NULL, updated_at TEXT NOT NULL, legacy_channel_id INTEGER UNIQUE
-        );
-        CREATE TABLE IF NOT EXISTS bw_listings (
-            id INTEGER PRIMARY KEY, url TEXT UNIQUE NOT NULL, source TEXT NOT NULL,
-            body TEXT NOT NULL, content_hash TEXT NOT NULL, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS bw_snapshots (
-            id INTEGER PRIMARY KEY, listing_id INTEGER NOT NULL REFERENCES bw_listings(id),
-            body TEXT NOT NULL, content_hash TEXT NOT NULL, captured_at TEXT NOT NULL,
-            UNIQUE(listing_id, content_hash)
-        );
-        CREATE TABLE IF NOT EXISTS bw_matches (
-            topic_id INTEGER NOT NULL REFERENCES bw_topics(id) ON DELETE CASCADE,
-            listing_id INTEGER NOT NULL REFERENCES bw_listings(id),
-            state TEXT NOT NULL DEFAULT 'pending', analysis TEXT, evaluation_key TEXT,
-            error TEXT, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL, evaluated_at TEXT,
-            PRIMARY KEY(topic_id, listing_id)
-        );
-        CREATE TABLE IF NOT EXISTS bw_runs (
-            id INTEGER PRIMARY KEY, topic_id INTEGER NOT NULL REFERENCES bw_topics(id) ON DELETE CASCADE,
-            state TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT, report TEXT NOT NULL DEFAULT '{}'
-        );
-        CREATE UNIQUE INDEX IF NOT EXISTS bw_one_run ON bw_runs(topic_id) WHERE state='running';
-        CREATE TABLE IF NOT EXISTS bw_feedback (
-            topic_id INTEGER NOT NULL REFERENCES bw_topics(id) ON DELETE CASCADE,
-            listing_id INTEGER NOT NULL REFERENCES bw_listings(id), verdict TEXT NOT NULL,
-            PRIMARY KEY(topic_id, listing_id)
-        );
-        CREATE TABLE IF NOT EXISTS bw_profile (
-            id INTEGER PRIMARY KEY CHECK(id=1), body TEXT NOT NULL,
-            revision INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL
-        );
-        ''')
         # Restart recovery; network work is never continued with an abandoned lock.
         db.execute("UPDATE bw_runs SET state='interrupted', finished_at=? WHERE state='running'", (now(),))
         db.execute("UPDATE bw_matches SET state='pending' WHERE state='evaluating'")

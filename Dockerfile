@@ -17,6 +17,7 @@ WORKDIR /app
 COPY backend/pyproject.toml backend/uv.lock ./
 RUN uv sync --frozen --no-dev
 COPY backend/app ./app
+COPY backend/alembic ./alembic
 # Coolify's CMD healthcheck runs this exact path.
 COPY backend/healthcheck.py ./healthcheck.py
 COPY --from=frontend /backend/app/static ./app/static
