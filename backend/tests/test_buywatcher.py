@@ -698,4 +698,33 @@ class EbayAccountDeletionTest(DatabaseFixture):
             self.assertNotIn('venditore1',json.dumps(repo.history(gone)))
 
 
+class ApiV1Test(DatabaseFixture):
+    def test_openapi_snapshot_is_current(self):
+        from app import export_openapi
+        self.assertEqual(export_openapi.PATH.read_text(),export_openapi.render(),
+                         'API cambiata: rigenera con uv run python -m app.export_openapi')
+
+    def test_v1_routes_operation_ids_and_problem_details(self):
+        with TestClient(app) as client:
+            spec=client.get('/openapi.json').json()
+            self.assertIn('/api/v1/topics',spec['paths'])
+            self.assertFalse([p for p in spec['paths'] if p.startswith('/api/') and not p.startswith('/api/v1/')
+                              and not p.startswith(('/api/channels','/api/feedback','/api/favorites','/api/deals'))])
+            self.assertEqual(spec['paths']['/api/v1/topics']['post']['operationId'],'create_topic')
+            response=client.get('/api/v1/topics/9999/listings')
+            self.assertEqual(response.status_code,404)
+            self.assertEqual(response.headers['content-type'],'application/problem+json')
+            self.assertEqual(response.json()['code'],'topic_not_found')
+            invalid=client.post('/api/v1/topics',json={'name':''})
+            self.assertEqual((invalid.status_code,invalid.json()['code']),(422,'validation_error'))
+
+    def test_if_match_on_topic_update(self):
+        with TestClient(app) as client:
+            current=self.t['revision']
+            stale=client.put(f"/api/v1/topics/{self.t['id']}",json=topic(),headers={'If-Match':str(current+5)})
+            self.assertEqual((stale.status_code,stale.json()['code']),(412,'version_mismatch'))
+            ok=client.put(f"/api/v1/topics/{self.t['id']}",json=topic(),headers={'If-Match':f'"{current}"'})
+            self.assertEqual(ok.json()['topic']['revision'],current+1)
+
+
 if __name__=='__main__':unittest.main()
