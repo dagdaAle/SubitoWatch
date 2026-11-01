@@ -8,4 +8,6 @@
 **/*.db-*
 .venv
 venv
-tests
+backend/tests
+frontend/node_modules
+backend/.venv

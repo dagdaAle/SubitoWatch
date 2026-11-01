@@ -10,8 +10,8 @@ from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 from typing import Any
 
-import storage
-from models import BuyerProfile
+from app.repositories import legacy_storage as storage
+from app.schemas import BuyerProfile
 
 _LOCK = threading.RLock()
 

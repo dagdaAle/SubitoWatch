@@ -14,14 +14,14 @@ from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError
 
-import ai
-import engine
-import legacy
-import repository as repo
-import scoring
-import sources
-import personalization
-from models import ListingInput, TopicInput, BuyerProfile
+from app.services import ai
+from app.services import engine
+from app import legacy
+from app.repositories import topics as repo
+from app.services import scoring
+from app import sources
+from app.services import personalization
+from app.schemas import ListingInput, TopicInput, BuyerProfile
 
 
 @asynccontextmanager
@@ -266,4 +266,6 @@ for route in legacy.app.routes:
     if getattr(route,'path','').startswith(('/channels','/feedback','/favorites','/deals')):
         app.router.routes.append(route)
 
-app.mount('/',StaticFiles(directory=Path(__file__).parent / 'static',html=True),name='static')
+STATIC=Path(__file__).parent / 'static'
+STATIC.mkdir(exist_ok=True)  # the frontend build is not committed; tests and dev run without it
+app.mount('/',StaticFiles(directory=STATIC,html=True),name='static')

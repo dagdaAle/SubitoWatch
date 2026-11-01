@@ -24,3 +24,6 @@ node_modules/
 *.db-*
 *.sqlite*
 .pytest_cache/
+
+# Frontend build output
+backend/app/static/

@@ -3,7 +3,7 @@ services:
   subitowatch:
     build:
       context: .
-      dockerfile: webapp/Dockerfile
+      dockerfile: Dockerfile
     image: buywatcher:latest
     container_name: subitowatch
     ports:

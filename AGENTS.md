@@ -14,17 +14,18 @@ Prima di toccare il codice leggi:
 
 ## Stato
 
-Il codice è ancora in `webapp/` (moduli piatti). La struttura `backend/` descritta in ARCHITECTURE.md arriva con il
-piano [02-backend](docs/plans/02-backend.md). Fino ad allora valgono i comandi qui sotto.
+Il codice è in `backend/app/` (package `app`, avviato con `app.main:app`) e il frontend in `frontend/`.
+La divisione completa `routers → services → repositories` è in corso: vedi [02-backend](docs/plans/02-backend.md).
 
-## Comandi (oggi)
+## Comandi
 
 ```bash
-python3 -m venv .venv && .venv/bin/pip install -r webapp/requirements.txt
-.venv/bin/python -B -m unittest discover -s tests -v       # test, senza rete
-npm ci --prefix webapp/frontend && npm run build --prefix webapp/frontend
-cd webapp && ../.venv/bin/uvicorn app:app --host 127.0.0.1 --port 8081   # variabili da .env caricate a mano
-docker compose up -d --build                                # dalla radice; mai `down -v`
+cd backend && uv sync                      # dipendenze (Python 3.13)
+cd backend && uv run pytest -q             # test, senza rete
+cd backend && uv run uvicorn app.main:app --port 8081 --reload   # variabili da .env caricate a mano
+cd frontend && npm ci && npm run build     # build in backend/app/static (non committata)
+cd frontend && npm run dev                 # Vite con proxy verso :8081
+docker compose up -d --build               # dalla radice; mai `down -v`
 ```
 
 ## Regole

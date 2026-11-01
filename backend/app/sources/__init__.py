@@ -34,8 +34,8 @@ import httpx
 
 from curl_cffi import requests as cffi
 
-import scraper
-from models import ListingInput
+from . import subito as scraper
+from app.schemas import ListingInput
 
 
 def flag(name):
