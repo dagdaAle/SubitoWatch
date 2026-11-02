@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
+from datetime import datetime, timezone
 from app.services import ai
 from app.services import personalization
 from app.services import engine
@@ -746,3 +747,40 @@ class ApiV1Test(DatabaseFixture):
 
 
 if __name__=='__main__':unittest.main()
+
+
+class NightScheduleTest(unittest.TestCase):
+    def topic(self,last_run=None,interval=24):
+        return {'active':True,'interval_hours':interval,'last_run':last_run}
+
+    def at(self,text):
+        return datetime.fromisoformat(text).astimezone(timezone.utc)
+
+    def test_collects_once_per_night_and_never_by_day(self):
+        night,day=self.at('2026-11-03T02:01:00+01:00'),self.at('2026-11-03T15:00:00+01:00')
+        self.assertIsNone(engine.due(self.topic(),day))
+        self.assertEqual(engine.due(self.topic(),night),'collect')
+        yesterday={'state':'success','started_at':'2026-11-02T14:00:00+01:00','report':{}}
+        self.assertEqual(engine.due(self.topic(yesterday),night),'collect')
+        tonight={'state':'success','started_at':'2026-11-03T02:00:30+01:00','report':{'evaluation':{'pending':0,'evaluated':40}}}
+        self.assertIsNone(engine.due(self.topic(tonight),night))
+        self.assertIsNone(engine.due(self.topic({**tonight,'state':'running'}),night))
+
+    def test_drains_queue_until_dawn_only_while_making_progress(self):
+        night=self.at('2026-11-03T05:00:00+01:00')
+        run={'state':'partial','started_at':'2026-11-03T02:00:30+01:00','report':{'evaluation':{'pending':30,'evaluated':12}}}
+        self.assertEqual(engine.due(self.topic(run),night),'evaluate')
+        stuck={**run,'report':{'evaluation':{'pending':30,'evaluated':0,'errors':5}}}
+        self.assertIsNone(engine.due(self.topic(stuck),night))
+        self.assertIsNone(engine.due(self.topic(run),self.at('2026-11-03T07:00:00+01:00')))
+
+    def test_long_interval_skips_nights(self):
+        night=self.at('2026-11-03T02:01:00+01:00')
+        last={'state':'success','started_at':'2026-11-02T02:00:00+01:00','report':{}}
+        self.assertIsNone(engine.due(self.topic(last,interval=48),night))
+        self.assertEqual(engine.due(self.topic(last,interval=24),night),'collect')
+
+    def test_vinted_publication_time_comes_from_the_main_photo(self):
+        self.assertEqual(sources._photo_time({'high_resolution':{'timestamp':1762041600}}),'2025-11-02T00:00:00+00:00')
+        self.assertEqual(sources._photo_time({'url':'x'}),'')
+        self.assertEqual(sources._photo_time(None),'')

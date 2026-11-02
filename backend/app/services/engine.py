@@ -7,6 +7,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from app.services import ai
 from app.repositories import topics as repo
@@ -15,6 +16,32 @@ from app.services import personalization
 from app.schemas import ListingInput
 
 log=logging.getLogger('buywatcher')
+NIGHT=(int(os.getenv('BUYWATCHER_NIGHT_START','2')),int(os.getenv('BUYWATCHER_NIGHT_END','7')))
+ZONE=ZoneInfo(os.getenv('BUYWATCHER_TIMEZONE','Europe/Rome'))
+NIGHT_LIMIT=1000
+
+
+def night_start(now):
+    """Start of the current night window, None during the day."""
+    local=now.astimezone(ZONE)
+    if not NIGHT[0]<=local.hour<NIGHT[1]:
+        return None
+    return local.replace(hour=NIGHT[0],minute=0,second=0,microsecond=0)
+
+
+def due(topic,now):
+    """'collect' once per night, then 'evaluate' while the queue drains; None otherwise."""
+    start=night_start(now)
+    previous=topic['last_run']
+    if not start or not topic['active'] or (previous and previous['state']=='running'):
+        return None
+    started=datetime.fromisoformat(previous['started_at']) if previous else None
+    if started is None or started<start:
+        # interval_hours above a day skips nights; a day or less means every night.
+        return 'collect' if started is None or topic['interval_hours']<=24 or (now-started).total_seconds()>=(topic['interval_hours']-12)*3600 else None
+    evaluation=(previous.get('report') or {}).get('evaluation') or {}
+    # Only while the last pass made progress: errors or a missing AI must not loop all night.
+    return 'evaluate' if evaluation.get('pending') and evaluation.get('evaluated') else None
 
 
 def publication_time(item):
@@ -51,7 +78,9 @@ def evaluate_pending(topic,max_evaluations=None):
             repo.save_evaluation(topic['id'],item['id'],'pending',error='AI non configurata o analisi non autorizzata per la fonte.')
             report['pending']+=1
             continue
-        if report['evaluated']+report['errors']>=limit:
+        # At night the GPU is free: the queue drains until the window closes.
+        cap=NIGHT_LIMIT if max_evaluations is None and night_start(datetime.now(timezone.utc)) else limit
+        if report['evaluated']+report['errors']>=cap:
             report['pending']+=1
             continue
         repo.save_evaluation(topic['id'],item['id'],'evaluating')
@@ -147,18 +176,13 @@ class Worker:
         return run_id
 
     def scheduler(self):
-        # First auto collection after a minute; topic edits/imports never trigger hidden searches.
+        # Automatic work happens only in the night window; topic edits/imports never trigger hidden searches.
         while not self.stop.wait(60):
+            now=datetime.now(timezone.utc)
             for topic in repo.list_topics():
-                if not topic['active']:
-                    continue
-                previous=topic['last_run']
-                if previous and previous['state']=='running':
-                    continue
-                stamp=previous['started_at'] if previous else topic['updated_at']
-                age=(datetime.now(timezone.utc)-datetime.fromisoformat(stamp)).total_seconds()
-                if age>=topic['interval_hours']*3600:
-                    self.submit(topic['id'])
+                action=due(topic,now)
+                if action:
+                    self.submit(topic['id'],collect=action=='collect')
 
     def start(self):
         self.thread.start()
