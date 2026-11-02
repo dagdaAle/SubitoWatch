@@ -621,7 +621,7 @@ class ApiTest(DatabaseFixture):
 class SizePolicyTest(unittest.TestCase):
     def test_photo_type_cannot_override_an_incompatible_declared_size(self):
         topic={'profile_scope':'fashion','buyer_profile':{'shoe_size_eu':44,'clothing_sizes':['L','XL']}}
-        ad={'title':'Vans donna n. 41','description':'Vendo per inutilizzo, numero 41'}
+        ad={'title':'Vans nere n. 41','description':'Vendo per inutilizzo, numero 41'}
         original=analysis();original.update(images_examined=1,observations=[{'basis':'image','claim':'Scarpe Vans','detail':'Le immagini mostrano un paio di scarpe nere con lacci','image_index':0}])
         original['size_check']=personalization.assess(topic,ad)
         original['requirement_unknowns']=[original['size_check']['reason']]
@@ -649,16 +649,34 @@ class SizePolicyTest(unittest.TestCase):
 
     def test_declared_sizes_are_filtered_without_converting_or_guessing(self):
         examples=[('Scarpe Vans taglia 44','pass'),('Vans Old Skool tg.46','exclude'),
-            ('Scarpe taglia 44,5','exclude'),('Scarpe num. 29 / 30','exclude'),
+            ('Scarpe taglia 44,5','unknown'),('Scarpe taglia 43','exclude'),('Scarpe num. 29 / 30','exclude'),
             ('Scarpe US 10','unknown'),('Scarpe EU 44 UK 9.5','pass'),
-            ('Felpa taglia L','pass'),('Felpa taglia XL','pass'),('Felpa taglia XXL','exclude'),
-            ('Felpa taglia M','exclude'),('T-shirt uomo L','pass'),
+            ('Felpa taglia L','pass'),('Felpa taglia XL','pass'),('Felpa taglia XXL','unknown'),('Felpa taglia 3XL','exclude'),
+            ('Felpa taglia M','unknown'),('Felpa taglia S','exclude'),('T-shirt uomo L','pass'),
             ('Felpa Vans Small','exclude'),('Felpa Extra Large','pass'),
             ('Scarpe Vans n. 43','exclude'),
             ('Felpa taglia 44','unknown'),('Felpa senza indicazione','unknown')]
         for title,expected in examples:
             with self.subTest(title=title):self.assertEqual(self.assess(title),expected)
         self.assertEqual(self.assess('Server con RAM 44 GB',scope='none'),'none')
+
+    def test_real_titles_from_vinted_and_subito(self):
+        examples=[('Polaire zippée The North Face Homme - Noir - Taille S','exclude'),
+            ('Veste','unknown'),('Felpa Vans','unknown'),
+            ('Borsone The North Face Gilman Duffel M','unknown'),
+            ('Felpa Vans bambino','exclude'),('Vans bébé','exclude'),
+            ('Piumino The North Face Hyalite Down Jacket Verde L Women','exclude'),
+            ('Felpa Vans uomo donna taglia L','pass'),('Vans Black plain t-shirt in XL','pass')]
+        for title,expected in examples:
+            with self.subTest(title=title):self.assertEqual(self.assess(title,scope='clothing'),expected)
+        self.assertEqual(self.assess('Felpa',scope='clothing',description='Taille: M'),'unknown')
+
+    def test_recognised_garment_skips_the_text_filter(self):
+        t=topic(profile_scope='clothing');t['buyer_profile']={'clothing_sizes':['L','XL']}
+        for title in ('Vans T-shirt','VANS men’s shorts','Mütze orange von Vans'):
+            self.assertTrue(personalization.garment(t,{'title':title}),title)
+        self.assertFalse(personalization.garment(t,{'title':'Zaino vans'}))
+        self.assertFalse(personalization.garment(topic(),{'title':'Vans T-shirt'}))
 
     def test_size_exclusion_skips_all_inference(self):
         t=topic(profile_scope='footwear');t['buyer_profile']={'shoe_size_eu':44}
