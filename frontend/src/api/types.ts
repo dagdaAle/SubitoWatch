@@ -25,7 +25,7 @@ export interface Listing {
   price: number | null; shipping_cost: number | null; fees: number | null; currency: string;
   town: string; images: string[]; condition: string; seller: string; is_shop: boolean;
   buying_format: string; availability: string; state: string; analysis: Analysis | null;
-  view: string; first_seen: string; last_seen: string; evaluated_at: string | null;
+  view: string; published_at: string; first_seen: string; last_seen: string; evaluated_at: string | null;
   verdict: 'like' | 'dislike' | null; error: string | null;
   recommendation: { score: number | null; label: string; total_cost: number | null; reference: number | null;
     savings_percent: number | null; reasons: string[]; comparables: { id: number; url: string; total_cost: number }[] };

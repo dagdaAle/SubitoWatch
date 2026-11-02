@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import time
+from datetime import datetime, timezone
 from html.parser import HTMLParser
 from urllib.parse import urlencode
 
@@ -273,7 +274,17 @@ class Vinted:
             source='vinted',
             external_id=item_id,
             availability='active',
+            # shortcut: Vinted search results carry no publication date; the main photo's upload time stands in for it.
+            published_at=_photo_time(raw.get('photo')),
         ).model_dump()
+
+
+def _photo_time(photo):
+    stamp=((photo or {}).get('high_resolution') or {}).get('timestamp') if isinstance(photo,dict) else None
+    try:
+        return datetime.fromtimestamp(int(stamp),timezone.utc).isoformat() if stamp else ''
+    except (TypeError,ValueError,OverflowError,OSError):
+        return ''
 
 
 VINTED = Vinted()

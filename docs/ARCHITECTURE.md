@@ -100,8 +100,8 @@ Un'esecuzione (`run`) riguarda un topic. Parte a mano (`refresh`), dallo schedul
    l'annuncio è escluso senza chiamare l'LLM.
 4. **Triage testuale** (LLM, economico): `exclude` o `inspect`. Gli esclusi non consumano analisi foto.
 5. **Valutazione** (LLM con visione): output validato contro lo schema `Analysis`; le osservazioni sulle foto
-   devono citare l'indice di una foto davvero allegata. Al massimo `BUYWATCHER_MAX_AI_PER_RUN` per esecuzione,
-   prima gli annunci pubblicati più di recente.
+   devono citare l'indice di una foto davvero allegata. Al massimo `BUYWATCHER_MAX_AI_PER_RUN` per esecuzione di giorno,
+   senza limite nella finestra notturna, prima gli annunci pubblicati più di recente.
 6. **Report** per fonte e per valutazione, salvato sull'esecuzione: `success`, `partial`, `failed`.
 
 **Cache e invalidazione.** Ogni valutazione ha una chiave = hash del contenuto dell'annuncio + hash di
@@ -248,8 +248,11 @@ dell'HTML è un **errore**, non una ricerca vuota. I connettori si testano su ri
 
 - **Un solo processo uvicorn, un solo thread di lavoro** (`ThreadPoolExecutor(max_workers=1)`): le fonti
   vanno distanziate comunque e SQLite ha un solo scrittore. Vedi [adr/003](adr/003-sqlite-un-processo.md).
-- Lo scheduler controlla ogni 60 s i topic `active` e non archiviati: se l'ultima esecuzione è partita da più di
-  `interval_hours`, ne accoda una. Salvare un topic non avvia ricerche nascoste.
+- Lo scheduler lavora solo nella **finestra notturna** (`BUYWATCHER_NIGHT_START`–`END`, predefinito 2–7,
+  `BUYWATCHER_TIMEZONE` Europe/Rome): ogni 60 s accoda una ricerca per i topic `active` non ancora cercati
+  in questa notte (`interval_hours` oltre 24 salta notti), poi esecuzioni di sola valutazione finché la coda
+  scende. Di notte il limite `BUYWATCHER_MAX_AI_PER_RUN` non vale (la GPU è libera); di giorno sì.
+  Salvare un topic non avvia ricerche nascoste.
 - **Riavvio**: le esecuzioni `running` diventano `interrupted`, le valutazioni `evaluating` tornano `pending`.
   Non si riprendono a metà.
 - La UI non fa polling a tempo fisso: TanStack Query interroga `GET /runs/{id}` solo mentre l'esecuzione è attiva.

@@ -135,8 +135,8 @@ Servono:
    `~/Progetti/server-apps/BuyWatcher` e il vecchio `server-apps/SubitoWatch` va archiviato.
 5. **Notifiche**: un nuovo consigliato arriva ad Ale tramite Hermes (messaggio o riga nel todo) solo se
    supera la soglia di affare, non per ogni annuncio.
-6. **Ricerche pianificate**: lo scheduler del worker rilancia i topic attivi ogni `interval_hours`
-   (minimo 6 h, predefinito 24). Proposta: tenerlo così e rendere visibile in UI la prossima esecuzione.
+6. **Ricerche pianificate**: deciso da Ale il 02/11/2026: ogni notte alle 2, poi la coda di valutazione
+   si svuota fino alle 7. Di giorno solo ricerche a mano.
 
 ## Fasi **(scelta di Claude)**
 
