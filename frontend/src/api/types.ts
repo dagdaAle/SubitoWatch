@@ -31,4 +31,3 @@ export interface Listing {
     savings_percent: number | null; reasons: string[]; comparables: { id: number; url: string; total_cost: number }[] };
 }
 
-export interface Marketplace { id:string; name:string; monitoring:boolean; status:'automatic'|'setup'|'external'; searches:{query:string;url:string}[] }
