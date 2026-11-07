@@ -151,6 +151,8 @@ class Ebay:
             fees=None,town=item.get('itemLocation',{}).get('city',''), images=list(dict.fromkeys(x for x in images if x))[:12],
             condition=item.get('conditionDescription') or item.get('condition') or '',
             seller=seller.get('username',''), source='ebay',external_id=item['itemId'],
+            attributes={**{a['name']:str(a['value']) for a in item.get('localizedAspects',[]) if a.get('name') and a.get('value')},
+                        **({'Paese':item['itemLocation']['country']} if item.get('itemLocation',{}).get('country') else {})},
             buying_format='auction' if 'AUCTION' in item.get('buyingOptions',[]) else 'fixed',
             availability='active' if (item.get('estimatedAvailabilities') or [{}])[0].get('estimatedAvailabilityStatus')=='IN_STOCK' else 'unknown').model_dump()
 
@@ -276,6 +278,7 @@ class Vinted:
             availability='active',
             # shortcut: Vinted search results carry no publication date; the main photo's upload time stands in for it.
             published_at=_photo_time(raw.get('photo')),
+            attributes={k:v for k,v in (('Marca',brand),('Taglia',size),('Condizione',text(raw.get('status')))) if v},
         ).model_dump()
 
 
@@ -309,4 +312,5 @@ def enrich(source, raw):
     return ListingInput(listing_url=raw['listing_url'],title=raw['title'],description=raw.get('description',''),
         price=raw.get('price'),town=raw.get('town',''),images=raw.get('images') or ([raw['thumbnail']] if raw.get('thumbnail') else []),
         seller=raw.get('shop_name',''),is_shop=raw.get('is_shop',False),source='subito',published_at=raw.get('date',''),
+        attributes=raw.get('attributes') or {},condition=(raw.get('attributes') or {}).get('Condizione',''),
         buying_format='unknown',availability='unknown').model_dump()

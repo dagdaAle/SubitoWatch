@@ -32,8 +32,9 @@ docker compose up -d --build               # dalla radice; mai `down -v`
 
 - **Comportamento di dominio**: valutazione, cache, scoring, fonti, taglie e foto non cambiano durante il refactor
   ([adr/002](docs/adr/002-rifattorizzare-non-riscrivere.md)). Un cambio di regola va in una PR sua.
-- **L'LLM non produce prezzi né punteggi di convenienza** ([adr/004](docs/adr/004-llm-estrae-fatti-convenienza-deterministica.md)).
-  Ciò che non si sa resta `None`/"non noto": mai 0 al posto di un dato mancante.
+- **Una scheda AI per annuncio** ([adr/010](docs/adr/010-scheda-ai-per-annuncio.md)): il modello compila la `Card`
+  (taglia, condizioni, provenienza, stima del nuovo, verdetto). La stima del nuovo si mostra sempre come stima; il
+  filtro taglie è deterministico sui campi della scheda. Ciò che non si sa resta `None`/"non noto": mai 0.
 - **Fonti** ([adr/005](docs/adr/005-politica-per-fonte.md)): niente login automatizzati, CAPTCHA o proxy a rotazione;
   una pagina per ricerca; 403/429 fermano la fonte. Ogni connettore ha la sua riga di politica e test su risposte registrate.
   **Mai** chiamare i marketplace veri nei test o in CI.

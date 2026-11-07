@@ -12,7 +12,6 @@ from zoneinfo import ZoneInfo
 from app.services import ai
 from app.repositories import topics as repo
 from app import sources
-from app.services import personalization
 from app.schemas import ListingInput
 
 log=logging.getLogger('buywatcher')
@@ -54,12 +53,9 @@ def publication_time(item):
     return 0
 
 
-def effective_topic(topic):
-    return {**topic,'buyer_profile':personalization.preferences(topic,repo.get_profile()),'size_policy':personalization.VERSION} if topic.get('profile_scope','none')!='none' else topic
-
-
 def key_for(topic,item):
-    topic={key:value for key,value in effective_topic(topic).items() if key not in ('counts','last_run')}
+    # The buyer profile is not part of the key: sizes are compared with the card at read time.
+    topic={key:value for key,value in topic.items() if key not in ('counts','last_run')}
     return item['content_hash']+':'+repo.digest({'topic':topic,'model':ai.signature(),
         'analysis_allowed':sources.source_config(item['source'])['analysis']})
 
@@ -85,7 +81,7 @@ def evaluate_pending(topic,max_evaluations=None):
             continue
         repo.save_evaluation(topic['id'],item['id'],'evaluating')
         try:
-            analysis=ai.evaluate(effective_topic(topic),item)
+            analysis=ai.card(topic,item)
             if key!=key_for(repo.get_topic(topic['id']),item):
                 repo.save_evaluation(topic['id'],item['id'],'pending')
                 report['pending']+=1

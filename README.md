@@ -2,7 +2,7 @@
 
 Radar personale dell’usato organizzato per **bisogni di acquisto**. Ogni topic
 contiene uso previsto, requisiti, preferenze, budget totale e ricerche. I candidati
-passano attraverso una valutazione AI di pertinenza, condizioni e foto disponibili
+passano attraverso una scheda compilata dall’AI (taglia, condizioni, provenienza, prezzo del nuovo, convenienza)
 prima di entrare nei risultati consigliati.
 
 React + TypeScript + FastAPI + SQLite. Un processo applicativo e una coda di lavoro

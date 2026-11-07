@@ -78,8 +78,8 @@ def save_profile(body):
         for row in db.execute('SELECT id,body FROM bw_topics').fetchall():
             scope=json.loads(row['body']).get('profile_scope','none')
             if (scope in ('fashion','footwear') and 'shoe_size_eu' in changed) or (scope in ('fashion','clothing') and 'clothing_sizes' in changed):
+                # Cards do not depend on the profile: sizes are re-compared on read, no new AI calls.
                 affected.append(row['id'])
-                db.execute("UPDATE bw_matches SET state='pending',analysis=NULL,evaluation_key=NULL,error=NULL,evaluated_at=NULL WHERE topic_id=?",(row['id'],))
     return get_profile(),affected
 
 

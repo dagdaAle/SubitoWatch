@@ -1,4 +1,4 @@
-"""Deterministic comparable-based scoring. Never substitute LLM price guesses."""
+"""Card-based recommendation: the model's deal verdict, plus a deterministic check on comparable asking prices."""
 from statistics import median
 from datetime import datetime, timezone
 from urllib.parse import urlsplit
@@ -24,56 +24,57 @@ def total_cost(item):
     return round(sum(values),2) if all(v is not None for v in values) else None
 
 
+def product_key(card):
+    """brand + model, the identity used to compare offers; None when the model is unknown."""
+    if not card.get('model'):
+        return None
+    return ' '.join(str(card.get(k) or '').strip().lower() for k in ('brand','model')).strip()
+
+
+def excluded(item):
+    card=item.get('analysis') or {}
+    return card.get('matches_need')=='no' or (item.get('size_check') or {}).get('status')=='exclude'
+
+
 def recommendation(topic, item, peers):
-    analysis = item.get('analysis') or {}
+    card = item.get('analysis') or {}
     total = total_cost(item)
-    result = dict(score=None, label='Non determinabile', total_cost=total, reference=None,
-                  savings_percent=None, comparables=[], reasons=[], cost_complete=total is not None)
+    new = card.get('new_price')
+    result = dict(score=None, label='Non determinabile', total_cost=total, reference=None, savings_percent=None,
+                  new_price=new, new_savings_percent=round((new-total)/new*100,1) if new and total is not None else None,
+                  deal=card.get('deal','unknown'), deal_reason=card.get('deal_reason',''),
+                  comparables=[], reasons=[], cost_complete=total is not None)
     if item['state']!='evaluated':
-        result['reasons']=['Annuncio non ancora valutato.']
+        result['reasons']=['Annuncio non ancora analizzato.']
         return result
-    if analysis.get('requirement_failures') or analysis.get('relevance',0)<topic['relevance_threshold']:
-        result.update(label='Non pertinente',reasons=analysis.get('requirement_failures') or ['Pertinenza insufficiente.'])
-        return result
-    if not sources.source_config(item['source'])['pricing']:
-        result['reasons']=['Valutazione economica non abilitata per questa fonte.']
-        return result
-    if stale(item):
-        result['reasons']=['Ultima verifica più vecchia di 72 ore: aggiorna prima di confrontare.']
+    if excluded(item):
+        reason=(item.get('size_check') or {}).get('reason') if (item.get('size_check') or {}).get('status')=='exclude' else card.get('matches_reason')
+        result.update(label='Non pertinente',reasons=[reason or 'Non è l’oggetto cercato.'])
         return result
     if item['availability']=='unavailable':
         result.update(label='Non disponibile',reasons=['Annuncio non più disponibile.'])
         return result
-    if item['buying_format']!='fixed':
-        result['reasons']=['Asta o formato non verificato: prezzo finale non noto.']
-        return result
-    if total is None or item['currency']!='EUR':
-        result['reasons']=['Costo totale incompleto o valuta non confrontabile.']
-        return result
-    if topic['budget'] and total>topic['budget']:
+    if topic['budget'] and total is not None and total>topic['budget']:
         result.update(label='Fuori budget',reasons=['Il costo totale supera il budget.'])
         return result
-    if analysis.get('missing_parts') or analysis.get('requirement_unknowns') or analysis.get('condition_grade')=='unknown':
-        result['reasons']=['Completezza, requisiti o condizioni richiedono verifica.']
-        return result
-    if not analysis.get('product_key') or not analysis.get('configuration'):
-        result['reasons']=['Modello o configurazione non identificati con sufficiente precisione.']
+    result['label']={'yes':'Vera offerta','no':'Non conveniente'}.get(result['deal'],'Convenienza da verificare')
+    # The comparison with other offers runs only where the data allows it; it never overrides the label.
+    key=product_key(card)
+    if (not sources.source_config(item['source'])['pricing'] or stale(item) or item['buying_format']!='fixed'
+            or total is None or item['currency']!='EUR' or not key or card.get('condition','unknown')=='unknown'):
         return result
     seen = set()
     seen_images = {duplicate_key(item)} - {None}
     seen_sellers = {item.get('seller','').strip().lower()} - {''}
     candidates=[]
     for other in peers:
-        a=other.get('analysis') or {}
-        # Separate eBay pricing data from other sources and never duplicate a URL.
+        c=other.get('analysis') or {}
+        # Separate eBay/Vinted pricing data from other sources and never duplicate a URL.
         if other['id']==item['id'] or other['listing_url'] in seen or other['source'] in ('ebay','vinted') or item['source'] in ('ebay','vinted'):
             continue
         if other['state']!='evaluated' or stale(other) or other['availability']=='unavailable' or other['buying_format']!='fixed':
             continue
-        if a.get('relevance',0)<topic['relevance_threshold'] or a.get('confidence',0)<70 or a.get('requirement_failures') or a.get('requirement_unknowns') or a.get('missing_parts'):
-            continue
-        keys=('product_key','configuration','condition_grade')
-        if any(str(a.get(k,'')).strip().lower()!=str(analysis.get(k,'')).strip().lower() for k in keys):
+        if c.get('matches_need')!='yes' or excluded(other) or product_key(c)!=key or c.get('condition')!=card.get('condition'):
             continue
         if other['currency']!='EUR' or other.get('is_shop')!=item.get('is_shop'):
             continue
@@ -89,16 +90,10 @@ def recommendation(topic, item, peers):
             if seller: seen_sellers.add(seller)
     result['comparables']=candidates
     if len(candidates)<3:
-        result['reasons']=['Servono almeno tre offerte comparabili indipendenti; le richieste attive non provano prezzi di vendita.']
         return result
     reference=median(c['total_cost'] for c in candidates)
     saving=(reference-total)/reference*100
-    # 50 = median asking price, 80 = 30% below; uncertainty and evidence limit badges.
-    score=round(max(0,min(100,50+saving)))
-    confidence=analysis.get('confidence',0)
-    if confidence<70 or analysis.get('risks'):
-        score=min(score,59)
-    result.update(score=score,reference=round(reference,2),savings_percent=round(saving,1),
-                  label='Potenziale affare' if score>=75 else 'Prezzo interessante' if score>=60 else 'Prezzo nella media' if score>=40 else 'Poco conveniente',
+    # 50 = median asking price, 80 = 30% below.
+    result.update(score=round(max(0,min(100,50+saving))),reference=round(reference,2),savings_percent=round(saving,1),
                   reasons=['Confronto con prezzi richiesti di offerte attive equivalenti, non con vendite concluse.'])
     return result
