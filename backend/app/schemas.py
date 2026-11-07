@@ -88,11 +88,18 @@ class ListingInput(BaseModel):
     external_id: str = Field(default='', max_length=200)
     published_at: str = ''
     availability: Literal['active', 'unavailable', 'unknown'] = 'unknown'
+    # Structured fields exactly as the source gives them (Subito features, Vinted size, eBay aspects).
+    attributes: dict[str, str] = Field(default_factory=dict, max_length=60)
 
     @field_validator('listing_url')
     @classmethod
     def valid_url(cls, value: str) -> str:
         return public_url(value)
+
+    @field_validator('attributes')
+    @classmethod
+    def short_attributes(cls, values: dict[str, str]) -> dict[str, str]:
+        return {k.strip()[:100]: v.strip()[:500] for k, v in values.items() if k.strip() and v and v.strip()}
 
     @field_validator('images')
     @classmethod
@@ -100,43 +107,44 @@ class ListingInput(BaseModel):
         return [public_url(v) for v in values]
 
 
-class Evidence(BaseModel):
-    model_config = ConfigDict(extra='forbid')
-    claim: str = Field(max_length=1000)
-    basis: Literal['description', 'image', 'metadata']
-    detail: str = Field(max_length=1000)
-    image_index: int | None = Field(default=None, ge=0, le=11)
+CLOTHING_SIZES = ('XXS','XS','S','M','L','XL','XXL','3XL','4XL','5XL')
 
 
-class Analysis(BaseModel):
-    model_config = ConfigDict(extra='forbid')
-    relevance: int = Field(ge=0, le=100)
-    confidence: int = Field(ge=0, le=100)
-    product_key: str | None = Field(default=None, max_length=200)
-    configuration: str | None = Field(default=None, max_length=300)
-    condition_grade: Literal['excellent', 'good', 'fair', 'poor', 'unknown']
-    requirement_failures: list[str] = Field(max_length=20)
-    requirement_unknowns: list[str] = Field(max_length=20)
-    declared_condition: list[str] = Field(max_length=20)
-    observations: list[Evidence] = Field(max_length=30)
-    missing_parts: list[str] = Field(max_length=20)
-    unknowns: list[str] = Field(max_length=20)
-    risks: list[str] = Field(max_length=20)
-    questions: list[str] = Field(max_length=10)
-    reason: str = Field(max_length=2000)
-    # Prices are calculated from source data; the model must never invent them.
+class Card(BaseModel):
+    """What the model extracts from one listing: the facts shown on the card. Unknown stays None."""
+    model_config = ConfigDict(extra='ignore', allow_inf_nan=False)
+    name: str = Field(min_length=1, max_length=200)
+    brand: str | None = Field(default=None, max_length=100)
+    model: str | None = Field(default=None, max_length=150)
+    category: Literal['clothing', 'footwear', 'other']
+    gender: Literal['men', 'women', 'unisex', 'kids', 'unknown'] = 'unknown'
+    size: str | None = Field(default=None, max_length=60)
+    size_source: Literal['platform', 'title', 'description', 'photo'] | None = None
+    clothing_size: Literal[CLOTHING_SIZES] | None = None
+    shoe_size_eu: float | None = Field(default=None, ge=15, le=55)
+    condition: Literal['new_with_tags', 'new', 'excellent', 'good', 'fair', 'poor', 'unknown']
+    defects: list[str] = Field(default_factory=list, max_length=10)
+    ships_from: str | None = Field(default=None, max_length=200)
+    shipping: Literal['shipping', 'pickup', 'both', 'unknown'] = 'unknown'
+    # The model's estimate of the new retail price: shown as an estimate, never as a verified price.
+    new_price: float | None = Field(default=None, gt=0)
+    matches_need: Literal['yes', 'no', 'unknown']
+    matches_reason: str = Field(default='', max_length=600)
+    deal: Literal['yes', 'no', 'unknown']
+    deal_reason: str = Field(default='', max_length=600)
+    missing_info: list[str] = Field(default_factory=list, max_length=10)
 
-
-class TextTriage(BaseModel):
-    model_config = ConfigDict(extra='forbid')
-    decision: Literal['exclude','inspect']
-    reason: str = Field(max_length=600)
+    @field_validator('clothing_size', mode='before')
+    @classmethod
+    def upper_size(cls, value):
+        value = value.strip().upper() if isinstance(value, str) else value
+        return {'XXXL': '3XL', '': None}.get(value, value) if isinstance(value, str) else value
 
 
 class BuyerProfile(BaseModel):
     model_config = ConfigDict(extra='forbid',allow_inf_nan=False)
     shoe_size_eu: float | None = Field(default=None,ge=15,le=55)
-    clothing_sizes: list[Literal['XXS','XS','S','M','L','XL','XXL','3XL','4XL','5XL']] = Field(default_factory=list,max_length=10)
+    clothing_sizes: list[Literal[CLOTHING_SIZES]] = Field(default_factory=list,max_length=10)
 
     @field_validator('shoe_size_eu')
     @classmethod
@@ -148,4 +156,4 @@ class BuyerProfile(BaseModel):
     @field_validator('clothing_sizes')
     @classmethod
     def unique_sizes(cls,values):
-        return [size for size in ['XXS','XS','S','M','L','XL','XXL','3XL','4XL','5XL'] if size in values]
+        return [size for size in CLOTHING_SIZES if size in values]

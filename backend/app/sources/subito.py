@@ -138,7 +138,20 @@ def _normalize(ad: dict[str, Any]) -> dict[str, Any] | None:
         "images": [f"{img['cdnBaseUrl']}?rule={_IMG_RULE}" for img in (ad.get("images") or []) if img and img.get("cdnBaseUrl")][:12],
         "is_shop": is_shop,
         "shop_name": shop_name,
+        "attributes": _features_of(ad),
     }
+
+
+def _features_of(ad: dict[str, Any]) -> dict[str, str]:
+    """Subito's structured fields (Taglia, Marca, Genere, Condizione, spedizione...) by label."""
+    result: dict[str, str] = {}
+    for feature in (ad.get("features") or {}).values():
+        if not isinstance(feature, dict) or not feature.get("label"):
+            continue
+        values = [str(v.get("value")) for v in feature.get("values") or [] if isinstance(v, dict) and v.get("value")]
+        if values:
+            result[feature["label"]] = ", ".join(values)
+    return result
 
 
 def search(

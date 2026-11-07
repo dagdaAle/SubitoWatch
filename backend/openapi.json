@@ -402,6 +402,14 @@
       },
       "ListingInput": {
         "properties": {
+          "attributes": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "maxProperties": 60,
+            "title": "Attributes",
+            "type": "object"
+          },
           "availability": {
             "default": "unknown",
             "enum": [

@@ -86,13 +86,25 @@ def topics():
 
 def current_items(topic):
     items=repo.matches(topic['id'])
-    personalized=engine.effective_topic(topic)
+    profile=repo.get_profile()
     for item in items:
         if item['state']=='evaluated' and item['evaluation_key']!=engine.key_for(topic,item):
-            item.update(state='pending',analysis=None,error='Le preferenze, il topic o il modello sono cambiati: rivaluta l’annuncio.')
-        if item['state']=='evaluated' and item.get('analysis'):
-            item['analysis']=personalization.refine(personalized,item,item['analysis'])
+            item.update(state='pending',analysis=None,error='Il topic o il modello sono cambiati: rianalizza l’annuncio.')
+        card=item.get('analysis') if item['state']=='evaluated' else None
+        item['size_check']=personalization.assess(topic,card,profile) if card else None
     return items
+
+
+def view_of(item):
+    card=item.get('analysis') or {}
+    if item['state']!='evaluated':
+        return 'review'
+    if scoring.excluded(item):
+        return 'excluded'
+    if (card.get('matches_need')!='yes' or (item.get('size_check') or {}).get('status')=='unknown'
+            or card.get('condition','unknown')=='unknown' or item['availability']=='unavailable' or scoring.stale(item)):
+        return 'review'
+    return 'relevant'
 
 
 @router.get('/topics/{topic_id}/marketplaces')
@@ -204,18 +216,13 @@ def listings(topic_id:int):
     items=[i for i in items if i['source']!='ebay' or (datetime.now(timezone.utc)-datetime.fromisoformat(i['last_seen'])).total_seconds()<6*3600]
     for item in items:
         item['recommendation']=scoring.recommendation(topic,item,items)
-        analysis=item.get('analysis') or {}
-        if item['state']!='evaluated':
-            item['view']='review'
-        elif analysis.get('requirement_failures') or analysis.get('relevance',0)<topic['relevance_threshold']:
-            item['view']='excluded'
-        elif analysis.get('requirement_unknowns') or analysis.get('missing_parts') or analysis.get('condition_grade','unknown')=='unknown' or analysis.get('risks') or analysis.get('confidence',0)<70 or item['availability']=='unavailable' or scoring.stale(item):
-            item['view']='review'
-        else:
-            item['view']='relevant'
+        item['view']=view_of(item)
     # Topic matches retain independent evaluations; exact URLs are globally deduplicated.
-    items.sort(key=lambda i:(i['recommendation']['score'] if i['recommendation']['score'] is not None else -1,
-                            (i.get('analysis') or {}).get('relevance',-1)),reverse=True)
+    def rank(i):
+        r=i['recommendation']
+        return (r['deal']=='yes', r['score'] if r['score'] is not None else -1,
+                r['new_savings_percent'] if r['new_savings_percent'] is not None else -1000)
+    items.sort(key=rank,reverse=True)
     return {'topic':topic,'listings':items}
 
 
